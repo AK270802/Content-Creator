@@ -71,6 +71,35 @@ def process_video(self, video_id: str) -> dict:
             )
             session.commit()
 
+            # ── Step 2.5: Event timeline extraction ──────────────────────────
+            timeline_events = []
+            try:
+                from app.services.event_timeline import event_timeline_service
+                from app.models.timeline import TimelineEvent
+                scene_boundaries = [sc.start_time for sc in scene_objs]
+                if scene_objs:
+                    scene_boundaries.append(scene_objs[-1].end_time)
+                video_duration = video.duration_seconds or (scene_objs[-1].end_time if scene_objs else 0.0)
+                raw_events = event_timeline_service.extract_timeline(
+                    video_path, video_duration, scene_boundaries
+                )
+                for ev in raw_events:
+                    te = TimelineEvent(
+                        video_id=uuid.UUID(video_id),
+                        chunk_id=ev["chunk_id"],
+                        start_ts=ev["start_ts"],
+                        end_ts=ev["end_ts"],
+                        description=ev["description"],
+                        tags=ev["tags"],
+                        confidence=ev["confidence"],
+                    )
+                    session.add(te)
+                    timeline_events.append(te)
+                session.commit()
+                logger.info(f"Stored {len(timeline_events)} timeline events for video {video_id}")
+            except Exception as exc:
+                logger.warning(f"Timeline extraction failed (non-fatal) for {video_id}: {exc}")
+
             # ── Step 3: Vision tagging (non-fatal per scene) ─────────────────
             for sc in scene_objs:
                 tags = vision_service.tag_scene(
@@ -109,8 +138,8 @@ def process_video(self, video_id: str) -> dict:
             if transcript:
                 embedding_service.upsert_segments(video_id, transcript)
 
-            # ── Step 7: Edit planning (added in piece 2, stubbed here) ───────
-            _run_edit_planning(session, video_id, scene_objs, segment_objs)
+            # ── Step 7: Edit planning ────────────────────────────────────────
+            _run_edit_planning(session, video_id, scene_objs, segment_objs, timeline_events)
 
         # ── Done ─────────────────────────────────────────────────────────────
         video.status = VideoStatus.READY
@@ -134,7 +163,7 @@ def process_video(self, video_id: str) -> dict:
         session.close()
 
 
-def _run_edit_planning(session, video_id: str, scene_objs, segment_data: list[dict]) -> None:
+def _run_edit_planning(session, video_id: str, scene_objs, segment_data: list[dict], timeline_events=None) -> None:
     """Generate an EditPlan after all scenes are tagged and transcript is embedded."""
     from app.models.edit_plan import EditPlan, EditPlanSegment
     from app.services.planning import planning_service, PlanningError
@@ -147,7 +176,7 @@ def _run_edit_planning(session, video_id: str, scene_objs, segment_data: list[di
     ).all()
 
     try:
-        plan_data = planning_service.generate_plan(str(video_id), scene_objs, seg_objs)
+        plan_data = planning_service.generate_plan(str(video_id), scene_objs, seg_objs, timeline_events or [])
         import uuid as _uuid
         edit_plan = EditPlan(
             video_id=_uuid.UUID(video_id) if isinstance(video_id, str) else video_id,

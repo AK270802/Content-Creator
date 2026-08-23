@@ -22,7 +22,12 @@ class PlanningService:
     """
 
     def _build_prompt(
-        self, video_id: str, scenes: list, segments: list, previous_error: str | None = None
+        self,
+        video_id: str,
+        scenes: list,
+        segments: list,
+        timeline_events: list | None = None,
+        previous_error: str | None = None,
     ) -> str:
         scenes_summary = [
             {
@@ -40,21 +45,34 @@ class PlanningService:
             {"start": s.start_time, "end": s.end_time, "text": s.text}
             for s in segments[:40]
         ]
+        timeline_preview = [
+            {
+                "start": te.start_ts,
+                "end": te.end_ts,
+                "description": te.description,
+                "tags": te.tags or [],
+                "confidence": round(te.confidence, 2),
+            }
+            for te in (timeline_events or [])[:50]
+        ]
         schema_desc = (
             '{"segments": [{"scene_id": "<uuid>", "action": "keep" | "cut", '
             '"reason": "<why>", "caption": "<text overlay>", "order": <int>}]}'
         )
         base = (
-            f"You are a professional video editor. Given the following scene analysis "
-            f"and transcript for video {video_id}, produce a JSON edit plan.\n\n"
+            f"You are a professional video editor. Given the scene analysis, "
+            f"event timeline, and transcript for video {video_id}, produce a JSON edit plan.\n\n"
             f"Rules:\n"
-            f"- Keep scenes with rich content, cut static/silent/blurry scenes\n"
-            f"- Assign a short, punchy caption to every kept scene\n"
+            f"- Use the event timeline to understand what happens within each scene\n"
+            f"- Keep scenes with rich content; cut static/silent/blurry scenes\n"
+            f"- Assign a short punchy caption referencing the key event in each kept scene\n"
             f"- Order kept scenes by their original scene_number\n"
             f"- Respond with ONLY valid JSON matching: {schema_desc}\n\n"
             f"Scenes:\n{json.dumps(scenes_summary, indent=2)}\n\n"
-            f"Transcript (first 40 segments):\n{json.dumps(transcript_preview, indent=2)}"
         )
+        if timeline_preview:
+            base += f"Event Timeline:\n{json.dumps(timeline_preview, indent=2)}\n\n"
+        base += f"Transcript (first 40 segments):\n{json.dumps(transcript_preview, indent=2)}"
         if previous_error:
             base += f"\n\nPrevious attempt failed validation:\n{previous_error}\nFix the JSON."
         return base
@@ -98,18 +116,18 @@ class PlanningService:
             segments.append(seg)
         return LLMPlan(segments=segments)
 
-    def generate_plan(self, video_id: str, scenes: list, segments: list) -> LLMPlan:
+    def generate_plan(self, video_id: str, scenes: list, segments: list, timeline_events: list | None = None) -> LLMPlan:
         if not settings.planning_model_base_url:
             logger.info(f"No planning LLM configured — using template plan for {video_id}")
             return self._template_plan(video_id, scenes)
 
-        prompt = self._build_prompt(video_id, scenes, segments)
+        prompt = self._build_prompt(video_id, scenes, segments, timeline_events)
         try:
             raw = self._call_llm(prompt)
             return self._parse_and_validate(raw)
         except (ValidationError, Exception) as first_err:
             logger.warning(f"Planning LLM attempt 1 failed for {video_id}: {first_err}")
-            retry_prompt = self._build_prompt(video_id, scenes, segments, str(first_err))
+            retry_prompt = self._build_prompt(video_id, scenes, segments, timeline_events, str(first_err))
             try:
                 raw2 = self._call_llm(retry_prompt)
                 return self._parse_and_validate(raw2)
@@ -123,12 +141,12 @@ class _PlanningServiceWithTracker(PlanningService):
     def __init__(self):
         self._last_llm_used = False
 
-    def generate_plan(self, video_id, scenes, segments):
+    def generate_plan(self, video_id, scenes, segments, timeline_events=None):
         if not settings.planning_model_base_url:
             self._last_llm_used = False
         else:
             self._last_llm_used = True
-        return super().generate_plan(video_id, scenes, segments)
+        return super().generate_plan(video_id, scenes, segments, timeline_events)
 
 
 planning_service = _PlanningServiceWithTracker()
