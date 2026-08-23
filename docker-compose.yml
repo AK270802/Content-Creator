@@ -1,0 +1,263 @@
+version: "3.9"
+
+networks:
+  editor-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:
+  minio-data:
+  keycloak-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+
+  # ------------------------------------------------------------------
+  # Metadata DB
+  # ------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: editor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-video_editor}
+      POSTGRES_USER: ${POSTGRES_USER:-editor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-editor}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - editor-net
+
+  # ------------------------------------------------------------------
+  # Task queue broker/backend
+  # ------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: editor-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - editor-net
+
+  # ------------------------------------------------------------------
+  # Vector store (transcript / scene embeddings)
+  # ------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: editor-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - editor-net
+
+  # ------------------------------------------------------------------
+  # Object storage (raw + processed video, S3-compatible)
+  # ------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: editor-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - editor-net
+
+  # ------------------------------------------------------------------
+  # Auth (OIDC / SSO / multi-tenant realms)
+  # ------------------------------------------------------------------
+  keycloak-db:
+    image: postgres:16-alpine
+    container_name: editor-keycloak-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-changeme}
+    volumes:
+      - keycloak-data:/var/lib/postgresql/data
+    networks:
+      - editor-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: editor-keycloak
+    restart: unless-stopped
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-changeme}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-changeme}
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-localhost}
+    ports:
+      - "8080:8080"
+    depends_on:
+      - keycloak-db
+    networks:
+      - editor-net
+
+  # ------------------------------------------------------------------
+  # Monitoring
+  # ------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: editor-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "9090:9090"
+    networks:
+      - editor-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: editor-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - editor-net
+
+  # ------------------------------------------------------------------
+  # Celery metrics exporter (exposes :9808/metrics for Prometheus)
+  # ------------------------------------------------------------------
+  celery-exporter:
+    image: danihodovic/celery-exporter:latest
+    container_name: editor-celery-exporter
+    restart: unless-stopped
+    command: --broker-url=redis://redis:6379/0
+    ports:
+      - "9808:9808"
+    depends_on:
+      - redis
+    networks:
+      - editor-net
+
+  # ------------------------------------------------------------------
+  # Celery worker (analysis + render pipeline)
+  # Build context assumes a Dockerfile at ./backend using requirements.txt
+  # ------------------------------------------------------------------
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: editor-celery-worker
+    restart: unless-stopped
+    command: celery -A app.worker worker --loglevel=info --concurrency=2
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - postgres
+      - qdrant
+      - minio
+    networks:
+      - editor-net
+    # GPU access for inference tasks (Whisper / Qwen3-VL / planning LLM)
+    # Requires nvidia-container-toolkit on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ------------------------------------------------------------------
+  # FastAPI app
+  # ------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: editor-api
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+      - minio
+      - keycloak
+    networks:
+      - editor-net
+
+# ------------------------------------------------------------------
+# Notes
+# ------------------------------------------------------------------
+# 1. vLLM model-serving (Qwen3-VL, planning LLM) is intentionally NOT in this
+#    compose file. Those need direct GPU passthrough and are heavy enough to
+#    run as their own dedicated services/pods, e.g.:
+#      docker run --gpus all -p 8001:8000 vllm/vllm-openai:latest \
+#        --model Qwen/Qwen3-VL-7B-Instruct
+#    Add them here once you confirm which GPU host they run on.
+#
+# 2. PostHog self-hosted is a multi-service stack on its own (ClickHouse,
+#    Kafka, etc.) and is not included here. Two options:
+#      a) Use PostHog Cloud (just an API key, no infra) to start, or
+#      b) Deploy self-hosted PostHog separately using their official
+#         docker-compose (https://github.com/PostHog/posthog), then point
+#         POSTHOG_HOST at it from the .env file.
+#
+# 3. Create a .env file alongside this compose file with at least:
+#      POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+#      MINIO_ROOT_USER, MINIO_ROOT_PASSWORD
+#      KEYCLOAK_DB_PASSWORD, KEYCLOAK_ADMIN, KEYCLOAK_ADMIN_PASSWORD
+#      GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD
+#      DATABASE_URL, REDIS_URL, QDRANT_URL, MINIO_ENDPOINT, KEYCLOAK_URL
+#      POSTHOG_API_KEY, POSTHOG_HOST
