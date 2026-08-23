@@ -135,5 +135,41 @@ def process_video(self, video_id: str) -> dict:
 
 
 def _run_edit_planning(session, video_id: str, scene_objs, segment_data: list[dict]) -> None:
-    """Stub — replaced by planning service import in piece 2."""
-    pass
+    """Generate an EditPlan after all scenes are tagged and transcript is embedded."""
+    from app.models.edit_plan import EditPlan, EditPlanSegment
+    from app.services.planning import planning_service, PlanningError
+    from app.models.video import Segment
+
+    # Re-query fresh Segment ORM objects (we only have raw dicts here)
+    seg_objs = session.query(Segment).filter(
+        Segment.video_id == video_id if not isinstance(video_id, str)
+        else Segment.video_id == __import__("uuid").UUID(video_id)
+    ).all()
+
+    try:
+        plan_data = planning_service.generate_plan(str(video_id), scene_objs, seg_objs)
+        import uuid as _uuid
+        edit_plan = EditPlan(
+            video_id=_uuid.UUID(video_id) if isinstance(video_id, str) else video_id,
+            llm_generated=bool(planning_service._last_llm_used),
+        )
+        session.add(edit_plan)
+        session.flush()
+
+        for seg in plan_data.segments:
+            ps = EditPlanSegment(
+                edit_plan_id=edit_plan.id,
+                scene_id=seg.scene_id,
+                action=seg.action,
+                reason=seg.reason,
+                caption=seg.caption,
+                order=seg.order,
+            )
+            session.add(ps)
+        session.commit()
+        logger.info(f"EditPlan {edit_plan.id} created for video {video_id}")
+    except PlanningError as e:
+        logger.error(f"Planning failed for video {video_id}: {e} — video still marked READY")
+    except Exception as e:
+        logger.error(f"Unexpected planning error for video {video_id}: {e}")
+
