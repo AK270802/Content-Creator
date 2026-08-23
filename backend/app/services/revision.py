@@ -88,6 +88,14 @@ class RevisionService:
             }
             for sc in scenes[:30]
         ]
+        threshold = settings.timeline_confidence_threshold
+        eligible_events = [te for te in timeline_events if te.confidence >= threshold]
+        filtered_out = len(timeline_events) - len(eligible_events)
+        if filtered_out:
+            logger.info(
+                f"Revision prompt: filtered {filtered_out} low-confidence timeline events "
+                f"(threshold={threshold}) for video {video_id}"
+            )
         timeline_summary = [
             {
                 "start": te.start_ts,
@@ -95,7 +103,7 @@ class RevisionService:
                 "description": te.description,
                 "tags": te.tags or [],
             }
-            for te in timeline_events[:50]
+            for te in eligible_events[:50]
         ]
         transcript_preview = [
             {"start": s.start_time, "end": s.end_time, "text": s.text}

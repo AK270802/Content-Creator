@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     posthog_api_key: str = ""
     posthog_host: str = "https://app.posthog.com"
 
+    # Timeline confidence filtering — events below threshold excluded from LLM context
+    # (kept in DB for auditing; only filtered from planning/revision prompts)
+    timeline_confidence_threshold: float = 0.5
+
+    # Revision governance — max /revise calls per user per UTC day
+    revision_daily_cap: int = 20
+
     class Config:
         env_file = ".env"
         extra = "ignore"

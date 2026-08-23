@@ -1,4 +1,5 @@
 ﻿import uuid
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -19,6 +20,40 @@ from app.services import analytics
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(tags=["edit-plans"])
+
+
+# ── revision daily cap ─────────────────────────────────────────────────────────
+
+async def _check_revision_cap(user_id: str, video_id: str) -> None:
+    """
+    Increment and check per-user daily revision counter stored in Redis.
+    Fails open (logs warning) if Redis is unreachable so the endpoint stays up.
+    Raises HTTP 429 when the daily cap is exceeded.
+    """
+    try:
+        import redis.asyncio as aioredis
+        cap_key = f"revise_cap:{user_id}:{date.today().isoformat()}"
+        client = aioredis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            daily_count = await client.incr(cap_key)
+            if daily_count == 1:
+                await client.expire(cap_key, 86400)
+            if daily_count > settings.revision_daily_cap:
+                analytics.capture(user_id, "revision_cap_hit", {
+                    "video_id": video_id,
+                    "daily_cap": settings.revision_daily_cap,
+                    "daily_count": daily_count,
+                })
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Daily revision limit of {settings.revision_daily_cap} reached. Try again tomorrow.",
+                )
+        finally:
+            await client.aclose()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(f"Revision cap check failed (failing open): {exc}")
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -240,6 +275,7 @@ async def revise_edit_plan(
     user_id: str = Depends(get_current_user_id),
 ):
     await _get_video_for_user(video_id, user_id, db)
+    await _check_revision_cap(user_id, str(video_id))
     current_plan = await _get_plan_for_user(plan_id, user_id, db)
     current_segs = await _load_segments(plan_id, db)
 

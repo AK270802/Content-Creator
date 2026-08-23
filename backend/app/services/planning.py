@@ -45,6 +45,14 @@ class PlanningService:
             {"start": s.start_time, "end": s.end_time, "text": s.text}
             for s in segments[:40]
         ]
+        threshold = settings.timeline_confidence_threshold
+        eligible = [te for te in (timeline_events or []) if te.confidence >= threshold]
+        filtered_out = len(timeline_events or []) - len(eligible)
+        if filtered_out:
+            logger.info(
+                f"Planning prompt: filtered {filtered_out} low-confidence timeline events "
+                f"(threshold={threshold}) for video {video_id}"
+            )
         timeline_preview = [
             {
                 "start": te.start_ts,
@@ -53,7 +61,7 @@ class PlanningService:
                 "tags": te.tags or [],
                 "confidence": round(te.confidence, 2),
             }
-            for te in (timeline_events or [])[:50]
+            for te in eligible[:50]
         ]
         schema_desc = (
             '{"segments": [{"scene_id": "<uuid>", "action": "keep" | "cut", '

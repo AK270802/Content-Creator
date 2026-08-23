@@ -145,8 +145,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus" },
-          "expr": "sum(celery_tasks_total{job=\"celery\",state=\"RECEIVED\"}) - sum(celery_tasks_total{job=\"celery\",state=\"SUCCESS\"}) - sum(celery_tasks_total{job=\"celery\",state=\"FAILURE\"})",
-          "legendFormat": "Queue depth",
+          "expr": "sum(celery_queue_length{job=\"celery\"}) by (queue_name)",
+          "legendFormat": "{{queue_name}}",
           "refId": "A"
         }
       ],
