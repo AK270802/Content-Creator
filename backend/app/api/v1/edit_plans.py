@@ -15,6 +15,7 @@ from app.models.render_job import RenderJob, RenderStatus
 from app.schemas.edit_plan import EditPlanSchema, EditPlanPatchRequest
 from app.schemas.render_job import RenderJobResponse
 from app.services.storage import storage_service
+from app.services import analytics
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(tags=["edit-plans"])
@@ -64,6 +65,11 @@ async def get_edit_plan(
     )
     segments = segs_result.scalars().all()
 
+    analytics.capture(user_id, "edit_plan_generated", {
+        "video_id": str(video_id),
+        "plan_id": str(plan.id),
+        "llm_generated": plan.llm_generated,
+    })
     return EditPlanSchema(
         id=plan.id,
         video_id=plan.video_id,
@@ -113,6 +119,10 @@ async def patch_edit_plan(
             seg.order = update.order
 
     await db.flush()
+    analytics.capture(user_id, "edit_plan_edited", {
+        "plan_id": str(plan_id),
+        "segments_updated": len(body.segments),
+    })
     logger.info(f"Edit plan {plan_id} patched by {user_id}: {len(body.segments)} segment(s) updated")
 
     segs_all_result = await db.execute(
@@ -165,6 +175,8 @@ async def approve_edit_plan(
     from app.tasks.render_pipeline import render_video
     render_video.delay(str(job.id))
 
+    analytics.capture(user_id, "edit_plan_approved", {"plan_id": str(plan_id)})
+    analytics.capture(user_id, "render_started", {"render_job_id": str(job.id), "video_id": str(plan.video_id)})
     logger.info(f"Edit plan {plan_id} approved by {user_id}; render job {job.id} queued")
     return RenderJobResponse(
         id=job.id,
@@ -199,6 +211,13 @@ async def get_render_job(
     output_url = None
     if job.status == RenderStatus.COMPLETE and job.output_key:
         output_url = storage_service.presign_url(job.output_key)
+        analytics.capture(user_id, "render_completed", {"render_job_id": str(job_id)})
+        analytics.capture(user_id, "export_downloaded", {"render_job_id": str(job_id), "output_key": job.output_key})
+    elif job.status == RenderStatus.FAILED:
+        analytics.capture(user_id, "render_failed", {
+            "render_job_id": str(job_id),
+            "error": job.error_message or "",
+        })
 
     return RenderJobResponse(
         id=job.id,
