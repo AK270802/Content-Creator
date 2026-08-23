@@ -88,3 +88,43 @@ def test_config_has_vision_fields():
     assert hasattr(settings, "vision_model_name")
     assert hasattr(settings, "vision_frame_count")
     assert settings.vision_frame_count == 3
+
+
+def test_vision_service_parses_llm_response():
+    """Happy path: mock vision LLM and assert structured result is returned."""
+    from app.services.vision import VisionService
+    svc = VisionService()
+    fake_response = {
+        "description": "A presenter showing a product demo on screen",
+        "visual_tags": ["person speaking", "product demo", "text on screen"],
+        "quality_flags": {"blurry": False, "poorly_framed": False, "static": False, "silent": False},
+    }
+    with patch("app.services.vision.settings") as ms:
+        ms.vision_model_base_url = "http://fake-ollama:11434"
+        ms.vision_model_name = "qwen3-vl:8b"
+        ms.vision_frame_count = 2
+        with patch.object(svc, "_extract_frames", return_value=["/f0.jpg", "/f1.jpg"]):
+            with patch.object(svc, "_call_vision_llm", return_value=fake_response):
+                result = svc.tag_scene("/fake/video.mp4", 5.0, 15.0)
+
+    assert result["description"] == "A presenter showing a product demo on screen"
+    assert "person speaking" in result["visual_tags"]
+    assert result["quality_flags"]["blurry"] is False
+    assert result["quality_flags"]["static"] is False
+
+
+def test_vision_service_no_frames_returns_empty():
+    """Empty frame extraction must not call the LLM and must return safe defaults."""
+    from app.services.vision import VisionService
+    svc = VisionService()
+    with patch("app.services.vision.settings") as ms:
+        ms.vision_model_base_url = "http://fake-ollama:11434"
+        ms.vision_model_name = "qwen3-vl:8b"
+        ms.vision_frame_count = 3
+        with patch.object(svc, "_extract_frames", return_value=[]):
+            with patch.object(svc, "_call_vision_llm") as ml:
+                result = svc.tag_scene("/fake/video.mp4", 0.0, 5.0)
+                ml.assert_not_called()
+
+    assert result["visual_tags"] == []
+    assert result["description"] is None

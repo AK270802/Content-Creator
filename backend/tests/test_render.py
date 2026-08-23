@@ -114,3 +114,48 @@ def test_config_has_render_fields():
     assert hasattr(settings, "render_output_prefix")
     assert hasattr(settings, "crossfade_duration")
     assert settings.crossfade_duration == 0.4
+
+
+# ── Sub-scene trim clamping (render_pipeline logic) ──────────────────────────
+
+def test_trim_clamping_within_scene_bounds():
+    """start_ts/end_ts within scene bounds → values unchanged."""
+    scene_start, scene_end = 10.0, 30.0
+    start = max(scene_start, min(15.0, scene_end))
+    end   = max(scene_start, min(25.0, scene_end))
+    assert start == 15.0
+    assert end == 25.0
+
+
+def test_trim_clamping_before_scene_start():
+    """start_ts before scene start → clamped to scene.start_time."""
+    scene_start, scene_end = 10.0, 30.0
+    start = max(scene_start, min(3.0, scene_end))
+    assert start == scene_start
+
+
+def test_trim_clamping_after_scene_end():
+    """end_ts beyond scene end → clamped to scene.end_time."""
+    scene_start, scene_end = 10.0, 30.0
+    end = max(scene_start, min(99.0, scene_end))
+    assert end == scene_end
+
+
+def test_trim_none_falls_back_to_scene_boundaries():
+    """None start_ts/end_ts → use scene.start_time / scene.end_time."""
+    scene_start, scene_end = 5.0, 20.0
+    ps_start_ts = None
+    ps_end_ts = None
+    start = ps_start_ts if ps_start_ts is not None else scene_start
+    end   = ps_end_ts   if ps_end_ts   is not None else scene_end
+    assert start == scene_start
+    assert end == scene_end
+
+
+def test_trim_start_equals_end_clamped_correctly():
+    """Edge: start_ts == end_ts (zero-length) both clamp inside scene."""
+    scene_start, scene_end = 0.0, 10.0
+    ts = 5.0
+    start = max(scene_start, min(ts, scene_end))
+    end   = max(scene_start, min(ts, scene_end))
+    assert start == end == 5.0

@@ -131,3 +131,69 @@ def test_edit_plan_status_transitions():
     statuses = list(EditPlanStatus)
     assert EditPlanStatus.APPROVED in statuses
     assert EditPlanStatus.RENDERING in statuses
+
+
+# ── Confidence filtering ──────────────────────────────────────────────────────
+
+def _mock_timeline_event(start=0.0, end=5.0, description="action", tags=None, confidence=1.0):
+    te = MagicMock()
+    te.start_ts = start
+    te.end_ts = end
+    te.description = description
+    te.tags = tags or ["action"]
+    te.confidence = confidence
+    return te
+
+
+def test_planning_prompt_filters_low_confidence_events():
+    """Events below timeline_confidence_threshold must not appear in the prompt."""
+    from app.services.planning import PlanningService
+    svc = PlanningService()
+
+    high = _mock_timeline_event(confidence=0.9, description="clear action")
+    low  = _mock_timeline_event(confidence=0.2, description="shaky cam noise")
+
+    with patch("app.services.planning.settings") as ms:
+        ms.planning_model_base_url = ""
+        ms.timeline_confidence_threshold = 0.5
+        prompt = svc._build_prompt(
+            video_id="vid-1",
+            scenes=[_mock_scene()],
+            segments=[_mock_segment()],
+            timeline_events=[high, low],
+        )
+
+    assert "shaky cam noise" not in prompt
+    assert "clear action" in prompt
+
+
+def test_planning_prompt_includes_events_at_threshold():
+    """Events exactly at threshold are included (>= not >)."""
+    from app.services.planning import PlanningService
+    svc = PlanningService()
+
+    borderline = _mock_timeline_event(confidence=0.5, description="borderline event")
+
+    with patch("app.services.planning.settings") as ms:
+        ms.planning_model_base_url = ""
+        ms.timeline_confidence_threshold = 0.5
+        prompt = svc._build_prompt(
+            video_id="vid-1",
+            scenes=[_mock_scene()],
+            segments=[_mock_segment()],
+            timeline_events=[borderline],
+        )
+
+    assert "borderline event" in prompt
+
+
+def test_config_has_confidence_threshold():
+    from app.config import settings
+    assert hasattr(settings, "timeline_confidence_threshold")
+    assert 0.0 < settings.timeline_confidence_threshold <= 1.0
+
+
+def test_config_has_revision_daily_cap():
+    from app.config import settings
+    assert hasattr(settings, "revision_daily_cap")
+    assert settings.revision_daily_cap > 0

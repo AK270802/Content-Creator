@@ -312,3 +312,112 @@ def test_timeline_extraction_completed_event_structure():
         assert "video_id" in props
     finally:
         analytics_mod.capture = original_capture
+
+
+# ── RevisionService failure paths ─────────────────────────────────────────────
+
+def test_revision_service_raises_after_two_llm_failures(monkeypatch):
+    """PlanningError raised when both LLM attempts return unusable output."""
+    import pytest
+    from unittest.mock import patch
+    import app.config as cfg
+    monkeypatch.setattr(cfg.settings, "planning_model_base_url", "http://fake-llm")
+
+    from app.services.revision import RevisionService
+    from app.services.planning import PlanningError
+
+    svc = RevisionService()
+    with patch.object(svc, "_call_llm", side_effect=ValueError("bad JSON")):
+        with pytest.raises(PlanningError):
+            svc.revise(
+                video_id="test-vid",
+                current_plan_segments=[],
+                scenes=[],
+                timeline_events=[],
+                transcript_segments=[],
+                instruction="remove all outdoor scenes",
+            )
+
+
+def test_revision_service_succeeds_on_second_attempt(monkeypatch):
+    """RevisionService returns a valid plan when first call fails but retry succeeds."""
+    from unittest.mock import patch
+    import app.config as cfg
+    monkeypatch.setattr(cfg.settings, "planning_model_base_url", "http://fake-llm")
+    monkeypatch.setattr(cfg.settings, "planning_model_name", "mistral:7b")
+    monkeypatch.setattr(cfg.settings, "planning_temperature", 0.1)
+
+    scene_id = uuid.uuid4()
+    valid_response = {"segments": [
+        {"scene_id": str(scene_id), "action": "keep", "reason": "good shot", "caption": "Action!", "order": 0}
+    ]}
+
+    from app.services.revision import RevisionService
+    svc = RevisionService()
+    with patch.object(svc, "_call_llm", side_effect=[ValueError("timeout"), valid_response]):
+        result = svc.revise(
+            video_id="test-vid",
+            current_plan_segments=[],
+            scenes=[],
+            timeline_events=[],
+            transcript_segments=[],
+            instruction="keep only action shots",
+        )
+
+    assert len(result.segments) == 1
+    assert str(result.segments[0].scene_id) == str(scene_id)
+
+
+def test_revision_service_confidence_filtering(monkeypatch):
+    """Low-confidence timeline events must be excluded from revision prompt."""
+    import app.config as cfg
+    monkeypatch.setattr(cfg.settings, "planning_model_base_url", "http://fake-llm")
+    monkeypatch.setattr(cfg.settings, "timeline_confidence_threshold", 0.5)
+
+    from unittest.mock import MagicMock, patch
+    from app.services.revision import RevisionService
+
+    high_conf = MagicMock()
+    high_conf.start_ts = 0.0
+    high_conf.end_ts = 5.0
+    high_conf.description = "high confidence action"
+    high_conf.tags = ["action"]
+    high_conf.confidence = 0.9
+
+    low_conf = MagicMock()
+    low_conf.start_ts = 5.0
+    low_conf.end_ts = 10.0
+    low_conf.description = "very uncertain flicker"
+    low_conf.tags = ["noise"]
+    low_conf.confidence = 0.1
+
+    svc = RevisionService()
+    prompt = svc._build_prompt(
+        video_id="v1",
+        current_segments=[],
+        scenes=[],
+        timeline_events=[high_conf, low_conf],
+        transcript_segments=[],
+        instruction="trim the intro",
+    )
+
+    assert "high confidence action" in prompt
+    assert "very uncertain flicker" not in prompt
+
+
+# ── Revision daily cap config ─────────────────────────────────────────────────
+
+def test_revision_cap_config_exists():
+    from app.config import settings
+    assert hasattr(settings, "revision_daily_cap")
+    assert isinstance(settings.revision_daily_cap, int)
+    assert settings.revision_daily_cap > 0
+
+
+def test_revision_cap_check_function_importable():
+    """_check_revision_cap must exist in edit_plans router."""
+    _setup_router_mocks()
+    from app.api.v1 import edit_plans
+    assert hasattr(edit_plans, "_check_revision_cap")
+    import asyncio
+    assert asyncio.iscoroutinefunction(edit_plans._check_revision_cap)
