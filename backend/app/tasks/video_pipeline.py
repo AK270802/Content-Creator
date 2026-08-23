@@ -97,6 +97,10 @@ def process_video(self, video_id: str) -> dict:
                     timeline_events.append(te)
                 session.commit()
                 logger.info(f"Stored {len(timeline_events)} timeline events for video {video_id}")
+                from app.services import analytics
+                analytics.capture(video_id, "timeline_extraction_completed", {
+                    "video_id": video_id, "event_count": len(timeline_events),
+                })
             except Exception as exc:
                 logger.warning(f"Timeline extraction failed (non-fatal) for {video_id}: {exc}")
 

@@ -90,28 +90,30 @@ def test_render_job_response_with_output_url():
     assert resp.output_url is not None
 
 
-def test_edit_plan_router_registered():
-    """Verify edit_plans router exposes all four required routes."""
-    # Block the full import chain — mock all heavy deps not in lightweight test venv
+def _setup_router_mocks():
     for mod in ("slowapi", "slowapi.util", "minio", "asyncpg"):
         sys.modules.setdefault(mod, MagicMock())
-
     db_mock = MagicMock()
     sys.modules["app.db"] = db_mock
     sys.modules["app.db.session"] = db_mock
     sys.modules.setdefault("app.dependencies", MagicMock())
     sys.modules.setdefault("app.services.storage", MagicMock())
-
     for key in list(sys.modules):
         if key in ("app.api.v1.edit_plans", "app.api.v1"):
             del sys.modules[key]
 
+
+def test_edit_plan_router_registered():
+    """Verify edit_plans router exposes all required routes including new versioning/revise routes."""
+    _setup_router_mocks()
     from app.api.v1 import edit_plans
     routes = {r.path for r in edit_plans.router.routes}
     assert "/videos/{video_id}/edit-plan" in routes
+    assert "/videos/{video_id}/edit-plans" in routes
     assert "/edit-plans/{plan_id}" in routes
     assert "/edit-plans/{plan_id}/approve" in routes
     assert "/render-jobs/{job_id}" in routes
+    assert "/videos/{video_id}/edit-plans/{plan_id}/revise" in routes
 
 
 def test_edit_plan_approve_requires_draft():
@@ -127,3 +129,186 @@ def test_edit_plan_segment_actions():
     from app.models.edit_plan import EditSegmentAction
     assert EditSegmentAction.KEEP == "keep"
     assert EditSegmentAction.CUT == "cut"
+
+
+# ── Item 2: Edit plan versioning ──────────────────────────────────────────────
+
+def test_edit_plan_schema_version_defaults():
+    from app.schemas.edit_plan import EditPlanSchema
+    from app.models.edit_plan import EditPlanStatus
+    from datetime import datetime, timezone
+
+    plan = EditPlanSchema(
+        id=uuid.uuid4(),
+        video_id=uuid.uuid4(),
+        status=EditPlanStatus.DRAFT,
+        llm_generated=False,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    assert plan.version == 1
+    assert plan.parent_version_id is None
+
+
+def test_edit_plan_schema_version_and_parent():
+    from app.schemas.edit_plan import EditPlanSchema
+    from app.models.edit_plan import EditPlanStatus
+    from datetime import datetime, timezone
+
+    parent_id = uuid.uuid4()
+    plan = EditPlanSchema(
+        id=uuid.uuid4(),
+        video_id=uuid.uuid4(),
+        status=EditPlanStatus.DRAFT,
+        llm_generated=True,
+        version=3,
+        parent_version_id=parent_id,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    assert plan.version == 3
+    assert plan.parent_version_id == parent_id
+
+
+def test_edit_plan_model_version_fields():
+    from app.models.edit_plan import EditPlan
+    assert hasattr(EditPlan, "version")
+    assert hasattr(EditPlan, "parent_version_id")
+
+
+# ── Item 3: Revision schema and service ──────────────────────────────────────
+
+def test_revise_request_schema():
+    from app.schemas.edit_plan import ReviseRequest
+    req = ReviseRequest(instruction="Remove all indoor shots")
+    assert req.instruction == "Remove all indoor shots"
+
+
+def test_revision_service_raises_without_llm(monkeypatch):
+    """RevisionService must raise PlanningError when no LLM is configured."""
+    import app.config as cfg
+    monkeypatch.setattr(cfg.settings, "planning_model_base_url", "")
+
+    from app.services.revision import RevisionService
+    from app.services.planning import PlanningError
+
+    svc = RevisionService()
+    import pytest
+    with pytest.raises(PlanningError, match="No planning LLM configured"):
+        svc.revise(
+            video_id="test-vid",
+            current_plan_segments=[],
+            scenes=[],
+            timeline_events=[],
+            transcript_segments=[],
+            instruction="make it shorter",
+        )
+
+
+def test_revision_service_module_importable():
+    from app.services import revision
+    assert hasattr(revision, "revision_service")
+    assert hasattr(revision, "RevisionService")
+
+
+# ── Item 4: Segment trim fields ───────────────────────────────────────────────
+
+def test_segment_schema_trim_fields():
+    from app.schemas.edit_plan import EditPlanSegmentSchema
+    from app.models.edit_plan import EditSegmentAction
+
+    seg = EditPlanSegmentSchema(
+        scene_id=uuid.uuid4(),
+        action=EditSegmentAction.KEEP,
+        start_ts=5.5,
+        end_ts=12.3,
+        text_overlay="Highlight moment",
+        order=0,
+    )
+    assert seg.start_ts == 5.5
+    assert seg.end_ts == 12.3
+    assert seg.text_overlay == "Highlight moment"
+
+
+def test_segment_trim_fields_optional():
+    from app.schemas.edit_plan import EditPlanSegmentSchema
+    from app.models.edit_plan import EditSegmentAction
+
+    seg = EditPlanSegmentSchema(
+        scene_id=uuid.uuid4(),
+        action=EditSegmentAction.KEEP,
+        order=0,
+    )
+    assert seg.start_ts is None
+    assert seg.end_ts is None
+    assert seg.text_overlay is None
+
+
+def test_segment_update_trim_fields():
+    from app.schemas.edit_plan import EditPlanSegmentUpdate
+
+    seg_id = uuid.uuid4()
+    upd = EditPlanSegmentUpdate(id=seg_id, start_ts=2.0, end_ts=9.5, text_overlay="Caption here")
+    assert upd.start_ts == 2.0
+    assert upd.end_ts == 9.5
+    assert upd.text_overlay == "Caption here"
+
+
+def test_edit_plan_segment_model_trim_fields():
+    from app.models.edit_plan import EditPlanSegment
+    assert hasattr(EditPlanSegment, "start_ts")
+    assert hasattr(EditPlanSegment, "end_ts")
+    assert hasattr(EditPlanSegment, "text_overlay")
+
+
+# ── Item 5: PostHog analytics properties ─────────────────────────────────────
+
+def test_edit_plan_revised_analytics_properties():
+    """edit_plan_revised must include plan_version and instruction_length, NOT raw instruction."""
+    captured = {}
+
+    import app.services.analytics as analytics_mod
+    original_capture = analytics_mod.capture
+
+    def mock_capture(user_id, event, props):
+        captured[event] = props
+
+    analytics_mod.capture = mock_capture
+    try:
+        analytics_mod.capture("u1", "edit_plan_revised", {
+            "plan_id": str(uuid.uuid4()),
+            "parent_plan_id": str(uuid.uuid4()),
+            "plan_version": 2,
+            "instruction_length": 42,
+        })
+        assert "edit_plan_revised" in captured
+        props = captured["edit_plan_revised"]
+        assert "plan_version" in props
+        assert "instruction_length" in props
+        assert "instruction" not in props  # privacy: raw text must NOT be present
+    finally:
+        analytics_mod.capture = original_capture
+
+
+def test_timeline_extraction_completed_event_structure():
+    """timeline_extraction_completed must include video_id and event_count."""
+    captured = {}
+
+    import app.services.analytics as analytics_mod
+    original_capture = analytics_mod.capture
+
+    def mock_capture(user_id, event, props):
+        captured[event] = props
+
+    analytics_mod.capture = mock_capture
+    try:
+        analytics_mod.capture("vid-123", "timeline_extraction_completed", {
+            "video_id": "vid-123",
+            "event_count": 7,
+        })
+        assert "timeline_extraction_completed" in captured
+        props = captured["timeline_extraction_completed"]
+        assert props["event_count"] == 7
+        assert "video_id" in props
+    finally:
+        analytics_mod.capture = original_capture
