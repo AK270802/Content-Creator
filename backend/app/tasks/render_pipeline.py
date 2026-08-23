@@ -80,10 +80,14 @@ def render_video(self, render_job_id: str) -> dict:
         for ps in kept_segs:
             scene = session.query(Scene).filter(Scene.id == ps.scene_id).first()
             if scene:
+                # Honour sub-scene trim points; clamp to scene bounds for safety
+                start = ps.start_ts if ps.start_ts is not None else scene.start_time
+                end = ps.end_ts if ps.end_ts is not None else scene.end_time
                 segments_data.append({
-                    "start_time": scene.start_time,
-                    "end_time": scene.end_time,
+                    "start_time": max(scene.start_time, min(start, scene.end_time)),
+                    "end_time": max(scene.start_time, min(end, scene.end_time)),
                     "caption": ps.caption or "",
+                    "text_overlay": ps.text_overlay or "",
                 })
 
         with tempfile.TemporaryDirectory() as tmpdir:

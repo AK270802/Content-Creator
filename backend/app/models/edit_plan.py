@@ -35,6 +35,10 @@ class EditPlan(Base):
         SAEnum(EditPlanStatus), nullable=False, default=EditPlanStatus.DRAFT
     )
     llm_generated: Mapped[bool] = mapped_column(nullable=False, default=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("edit_plans.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         server_default=text("now()"), nullable=False
     )
@@ -67,6 +71,9 @@ class EditPlanSegment(Base):
     )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     caption: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    text_overlay: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    start_ts: Mapped[float | None] = mapped_column(nullable=True)
+    end_ts: Mapped[float | None] = mapped_column(nullable=True)
     order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     edit_plan: Mapped["EditPlan"] = relationship("EditPlan", back_populates="segments")
