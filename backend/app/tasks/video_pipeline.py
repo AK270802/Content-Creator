@@ -114,6 +114,59 @@ def process_video(self, video_id: str) -> dict:
                 sc.quality_flags = tags["quality_flags"]
             session.commit()
 
+            # ── Step 3.5: Scene + poster thumbnails ──────────────────────────
+            try:
+                from app.services.thumbnails import thumbnail_service
+                from app.models.brand_kit import GeneratedThumbnail
+
+                for sc in scene_objs:
+                    try:
+                        result = thumbnail_service.generate_scene_thumbnail(
+                            video_path, video_id, str(sc.id), sc.start_time, sc.end_time,
+                        )
+                        sc.thumbnail_key = result.key
+                    except Exception as thumb_exc:
+                        logger.warning(f"Scene thumbnail failed for {sc.id}: {thumb_exc}")
+                session.commit()
+
+                poster = thumbnail_service.generate_video_poster(
+                    video_path, video_id, video.duration_seconds,
+                )
+                video.thumbnail_key = poster.key
+
+                scene_dicts = [
+                    {"start_time": sc.start_time, "end_time": sc.end_time}
+                    for sc in scene_objs
+                ]
+                timestamps = thumbnail_service.pick_highlight_timestamps(scene_dicts, count=4)
+                for result in thumbnail_service.generate_ai_thumbnail_options(
+                    video_path, video_id, timestamps, count=4,
+                ):
+                    session.add(GeneratedThumbnail(
+                        video_id=uuid.UUID(video_id),
+                        storage_key=result.key,
+                        variant=result.variant,
+                        timestamp=result.timestamp,
+                        label=f"Option @ {result.timestamp:.1f}s",
+                    ))
+                session.commit()
+                logger.info(f"Thumbnails generated for video {video_id}")
+            except Exception as exc:
+                logger.warning(f"Thumbnail generation failed (non-fatal) for {video_id}: {exc}")
+
+            # ── Step 3.6: Proxy preview media ────────────────────────────────
+            try:
+                from app.config import settings as _settings
+                if _settings.proxy_enabled:
+                    from app.services.proxy import generate_proxy
+                    video.proxy_key = generate_proxy(
+                        video_path, video_id, height=_settings.proxy_height,
+                    )
+                    session.commit()
+                    logger.info(f"Proxy generated for video {video_id}")
+            except Exception as exc:
+                logger.warning(f"Proxy generation failed (non-fatal) for {video_id}: {exc}")
+
             # ── Step 4: Extract audio ────────────────────────────────────────
             import ffmpeg as _ffmpeg
             (

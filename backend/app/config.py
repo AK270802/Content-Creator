@@ -26,16 +26,11 @@ class Settings(BaseSettings):
 
     # MinIO
     minio_endpoint: str = "localhost:9000"
+    minio_public_url: str = ""
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin123"
     minio_bucket: str = "videos"
     minio_secure: bool = False
-
-    # Keycloak
-    keycloak_url: str = "http://localhost:8080"
-    keycloak_realm: str = "editor"
-    keycloak_client_id: str = "editor-api"
-    keycloak_client_secret: str = ""
 
     # vLLM / LLM
     vllm_base_url: str = ""
@@ -49,7 +44,21 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = "changeme-use-a-long-random-string-in-production"
-    access_token_expire_minutes: int = 60
+    jwt_secret: str = "changeme-use-a-long-random-string-in-production"
+    access_token_expire_minutes: int = 15
+    # Fernet key for encrypting TOTP secrets at rest (generate: Fernet.generate_key().decode())
+    totp_encryption_key: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+    # Frontend base URL (used in email links)
+    frontend_url: str = "http://localhost:8081"
+
+    # SMTP (optional — emails are no-ops if smtp_host is empty)
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_from: str = "noreply@cutroom.local"
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_tls: bool = True
 
 
     # Vision model (OpenAI-compatible: Ollama llava, vLLM, etc.)
@@ -80,6 +89,14 @@ class Settings(BaseSettings):
 
     # Revision governance — max /revise calls per user per UTC day
     revision_daily_cap: int = 20
+
+    # Localization / TTS
+    tts_provider: str = "auto"  # auto | edge | openai | stub
+    tts_model: str = "tts-1"
+
+    # Proxy preview
+    proxy_height: int = 720
+    proxy_enabled: bool = True
 
     class Config:
         env_file = ".env"

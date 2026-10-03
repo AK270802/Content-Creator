@@ -1,4 +1,5 @@
-version: "3.9"
+name: video-editor
+#version: "3.9"
 
 networks:
   editor-net:
@@ -9,7 +10,6 @@ volumes:
   redis-data:
   qdrant-data:
   minio-data:
-  keycloak-data:
   prometheus-data:
   grafana-data:
 
@@ -98,42 +98,6 @@ services:
       - editor-net
 
   # ------------------------------------------------------------------
-  # Auth (OIDC / SSO / multi-tenant realms)
-  # ------------------------------------------------------------------
-  keycloak-db:
-    image: postgres:16-alpine
-    container_name: editor-keycloak-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-changeme}
-    volumes:
-      - keycloak-data:/var/lib/postgresql/data
-    networks:
-      - editor-net
-
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.0
-    container_name: editor-keycloak
-    restart: unless-stopped
-    command: start-dev
-    environment:
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
-      KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-changeme}
-      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-changeme}
-      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-localhost}
-    ports:
-      - "8080:8080"
-    depends_on:
-      - keycloak-db
-    networks:
-      - editor-net
-
-  # ------------------------------------------------------------------
   # Monitoring
   # ------------------------------------------------------------------
   prometheus:
@@ -197,6 +161,9 @@ services:
     command: celery -A app.worker worker --loglevel=info --concurrency=2
     env_file:
       - .env
+    # Image HEALTHCHECK probes /health:8000 (API only) — disable for the worker
+    healthcheck:
+      disable: true
     depends_on:
       - redis
       - postgres
@@ -215,7 +182,7 @@ services:
               capabilities: [gpu]
 
   # ------------------------------------------------------------------
-  # FastAPI app
+  # FastAPI app (native JWT auth — register/login/MFA via /api/v1/auth)
   # ------------------------------------------------------------------
   api:
     build:
@@ -233,7 +200,6 @@ services:
       - redis
       - qdrant
       - minio
-      - keycloak
     networks:
       - editor-net
 
@@ -257,7 +223,9 @@ services:
 # 3. Create a .env file alongside this compose file with at least:
 #      POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
 #      MINIO_ROOT_USER, MINIO_ROOT_PASSWORD
-#      KEYCLOAK_DB_PASSWORD, KEYCLOAK_ADMIN, KEYCLOAK_ADMIN_PASSWORD
 #      GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD
-#      DATABASE_URL, REDIS_URL, QDRANT_URL, MINIO_ENDPOINT, KEYCLOAK_URL
+#      DATABASE_URL, REDIS_URL, QDRANT_URL, MINIO_ENDPOINT
+#      JWT_SECRET, TOTP_ENCRYPTION_KEY, FRONTEND_URL
 #      POSTHOG_API_KEY, POSTHOG_HOST
+#
+# 4. Auth is native FastAPI (/api/v1/auth) — register, login, refresh, MFA.

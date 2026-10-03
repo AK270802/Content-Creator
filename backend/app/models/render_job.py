@@ -1,8 +1,8 @@
 ﻿import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import String, Text, ForeignKey, Enum as SAEnum, text, DateTime
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import String, Text, ForeignKey, Enum as SAEnum, text, DateTime, Boolean
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.video import Base
@@ -34,6 +34,11 @@ class RenderJob(Base):
     )
     output_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    aspect_ratio: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    burn_captions: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    brand_kit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

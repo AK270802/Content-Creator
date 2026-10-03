@@ -1,7 +1,7 @@
-﻿import uuid
+import uuid
 import os
 import tempfile
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from loguru import logger
@@ -14,7 +14,7 @@ from app.dependencies import get_current_user_id
 from app.models.video import Video, Scene, Segment
 from app.models.enums import VideoStatus
 from app.schemas.video import (
-    VideoCreateResponse, VideoStatusResponse,
+    VideoCreateResponse, VideoResponse, VideoStatusResponse,
     SceneResponse, SegmentResponse, TranscriptResponse,
 )
 from app.services.storage import storage_service
@@ -30,10 +30,38 @@ ALLOWED_CONTENT_TYPES = {
 MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 
 
+@router.get("", response_model=list[VideoResponse])
+@limiter.limit(settings.rate_limit_default)
+async def list_videos(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    result = await db.execute(
+        select(Video).where(Video.user_id == user_id).order_by(Video.created_at.desc())
+    )
+    return [VideoResponse.from_orm(v) for v in result.scalars().all()]
+
+
+@router.get("/{video_id}", response_model=VideoResponse)
+@limiter.limit(settings.rate_limit_default)
+async def get_video(
+    request: Request,
+    video_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    result = await db.execute(select(Video).where(Video.id == video_id, Video.user_id == user_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return VideoResponse.from_orm(video)
+
+
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED, response_model=VideoCreateResponse)
 @limiter.limit(settings.rate_limit_upload)
 async def upload_video(
-    request,
+    request: Request,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
@@ -48,7 +76,6 @@ async def upload_video(
     video_id = uuid.uuid4()
     s3_key = f"videos/{user_id}/{video_id}/{safe_filename}"
 
-    # Stream upload to MinIO via temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_filename)[1]) as tmp:
         total = 0
         chunk_size = 1024 * 1024  # 1 MB
@@ -93,7 +120,7 @@ async def upload_video(
 @router.get("/{video_id}/status", response_model=VideoStatusResponse)
 @limiter.limit(settings.rate_limit_default)
 async def get_video_status(
-    request,
+    request: Request,
     video_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
@@ -110,7 +137,7 @@ async def get_video_status(
 @router.get("/{video_id}/scenes", response_model=list[SceneResponse])
 @limiter.limit(settings.rate_limit_default)
 async def get_scenes(
-    request,
+    request: Request,
     video_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
@@ -145,7 +172,7 @@ async def get_scenes(
 @router.get("/{video_id}/transcript", response_model=TranscriptResponse)
 @limiter.limit(settings.rate_limit_default)
 async def get_transcript(
-    request,
+    request: Request,
     video_id: uuid.UUID,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),

@@ -88,6 +88,12 @@ def render_video(self, render_job_id: str) -> dict:
                     "end_time": max(scene.start_time, min(end, scene.end_time)),
                     "caption": ps.caption or "",
                     "text_overlay": ps.text_overlay or "",
+                    "brightness": ps.brightness if ps.brightness is not None else 1.0,
+                    "contrast": ps.contrast if ps.contrast is not None else 1.0,
+                    "saturation": ps.saturation if ps.saturation is not None else 1.0,
+                    "fade_in": ps.fade_in or 0.0,
+                    "fade_out": ps.fade_out or 0.0,
+                    "effect": ps.effect or "none",
                 })
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -96,7 +102,41 @@ def render_video(self, render_job_id: str) -> dict:
             storage_service.download_to_file(video.s3_key, video_path)
 
             output_path = os.path.join(tmpdir, f"rendered_{render_job_id}.mp4")
-            render_service.render(video_path, segments_data, output_path)
+
+            logo_path = None
+            if job.brand_kit_id:
+                from app.models.brand_kit import BrandKit
+                kit = (
+                    session.query(BrandKit)
+                    .filter(
+                        BrandKit.id == job.brand_kit_id,
+                        BrandKit.user_id == video.user_id,
+                    )
+                    .first()
+                )
+                if kit and kit.logo_key:
+                    logo_path = os.path.join(tmpdir, "logo.png")
+                    try:
+                        storage_service.download_to_file(kit.logo_key, logo_path)
+                    except Exception as logo_exc:
+                        logger.warning(f"Brand logo download failed: {logo_exc}")
+                        logo_path = None
+                elif job.brand_kit_id:
+                    logger.warning(
+                        f"Brand kit {job.brand_kit_id} skipped — not owned by video user"
+                    )
+
+            opts = job.options or {}
+            render_service.render(
+                video_path,
+                segments_data,
+                output_path,
+                preset_id=job.preset_id,
+                aspect_ratio=job.aspect_ratio,
+                burn_captions=bool(job.burn_captions) if job.burn_captions is not None else True,
+                prefer_faces=bool(opts.get("prefer_faces", True)),
+                logo_path=logo_path,
+            )
 
             # Upload rendered file
             from app.config import settings

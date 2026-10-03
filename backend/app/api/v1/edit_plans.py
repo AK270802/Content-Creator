@@ -1,6 +1,6 @@
-﻿import uuid
+import uuid
 from datetime import date
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from loguru import logger
@@ -13,8 +13,8 @@ from app.dependencies import get_current_user_id
 from app.models.video import Video, Scene, Segment
 from app.models.edit_plan import EditPlan, EditPlanSegment, EditPlanStatus
 from app.models.render_job import RenderJob, RenderStatus
-from app.schemas.edit_plan import EditPlanSchema, EditPlanPatchRequest, ReviseRequest
-from app.schemas.render_job import RenderJobResponse
+from app.schemas.edit_plan import EditPlanSchema, EditPlanSegmentSchema, EditPlanPatchRequest, EditPlanSegmentCreate, ReviseRequest
+from app.schemas.render_job import RenderJobResponse, ExportOptions
 from app.services.storage import storage_service
 from app.services import analytics
 
@@ -25,11 +25,6 @@ router = APIRouter(tags=["edit-plans"])
 # ── revision daily cap ─────────────────────────────────────────────────────────
 
 async def _check_revision_cap(user_id: str, video_id: str) -> None:
-    """
-    Increment and check per-user daily revision counter stored in Redis.
-    Fails open (logs warning) if Redis is unreachable so the endpoint stays up.
-    Raises HTTP 429 when the daily cap is exceeded.
-    """
     try:
         import redis.asyncio as aioredis
         cap_key = f"revise_cap:{user_id}:{date.today().isoformat()}"
@@ -87,7 +82,47 @@ async def _load_segments(plan_id: uuid.UUID, db: AsyncSession) -> list[EditPlanS
     return list(result.scalars().all())
 
 
-def _plan_to_schema(plan: EditPlan, segments: list[EditPlanSegment]) -> EditPlanSchema:
+async def _load_scene_map(video_id: uuid.UUID, db: AsyncSession) -> dict[uuid.UUID, Scene]:
+    result = await db.execute(select(Scene).where(Scene.video_id == video_id))
+    return {s.id: s for s in result.scalars().all()}
+
+
+def _plan_to_schema(
+    plan: EditPlan,
+    segments: list[EditPlanSegment],
+    scene_map: dict[uuid.UUID, Scene] | None = None,
+) -> EditPlanSchema:
+    seg_schemas: list[EditPlanSegmentSchema] = []
+    for seg in segments:
+        scene = scene_map.get(seg.scene_id) if scene_map else None
+        start = seg.start_ts if seg.start_ts is not None else (scene.start_time if scene else 0.0)
+        end = seg.end_ts if seg.end_ts is not None else (scene.end_time if scene else 0.0)
+        thumbnail_url = None
+        if scene and scene.thumbnail_key:
+            try:
+                thumbnail_url = storage_service.presign_url(scene.thumbnail_key)
+            except Exception:
+                pass
+        seg_schemas.append(EditPlanSegmentSchema(
+            id=seg.id,
+            scene_id=seg.scene_id,
+            action=seg.action,
+            reason=seg.reason,
+            caption=seg.caption,
+            text_overlay=seg.text_overlay,
+            start_ts=seg.start_ts,
+            end_ts=seg.end_ts,
+            order=seg.order,
+            brightness=seg.brightness,
+            contrast=seg.contrast,
+            saturation=seg.saturation,
+            fade_in=seg.fade_in,
+            fade_out=seg.fade_out,
+            effect=seg.effect,
+            start=start,
+            end=end,
+            thumbnail_url=thumbnail_url,
+        ))
     return EditPlanSchema(
         id=plan.id,
         video_id=plan.video_id,
@@ -95,9 +130,11 @@ def _plan_to_schema(plan: EditPlan, segments: list[EditPlanSegment]) -> EditPlan
         llm_generated=plan.llm_generated,
         version=plan.version,
         parent_version_id=plan.parent_version_id,
+        parent_plan_id=plan.parent_version_id,
+        revision_instruction=plan.revision_instruction,
         created_at=plan.created_at,
         updated_at=plan.updated_at,
-        segments=list(segments),
+        segments=seg_schemas,
     )
 
 
@@ -106,12 +143,13 @@ def _plan_to_schema(plan: EditPlan, segments: list[EditPlanSegment]) -> EditPlan
 @router.get("/videos/{video_id}/edit-plans", response_model=list[EditPlanSchema])
 @limiter.limit(settings.rate_limit_default)
 async def list_edit_plans(
-    request,
+    request: Request,
     video_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
     await _get_video_for_user(video_id, user_id, db)
+    scene_map = await _load_scene_map(video_id, db)
     result = await db.execute(
         select(EditPlan).where(EditPlan.video_id == video_id).order_by(EditPlan.version)
     )
@@ -119,7 +157,7 @@ async def list_edit_plans(
     out = []
     for plan in plans:
         segs = await _load_segments(plan.id, db)
-        out.append(_plan_to_schema(plan, segs))
+        out.append(_plan_to_schema(plan, segs, scene_map))
     return out
 
 
@@ -128,12 +166,13 @@ async def list_edit_plans(
 @router.get("/videos/{video_id}/edit-plan", response_model=EditPlanSchema)
 @limiter.limit(settings.rate_limit_default)
 async def get_edit_plan(
-    request,
+    request: Request,
     video_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
     await _get_video_for_user(video_id, user_id, db)
+    scene_map = await _load_scene_map(video_id, db)
     result = await db.execute(
         select(EditPlan).where(EditPlan.video_id == video_id).order_by(EditPlan.version.desc())
     )
@@ -144,7 +183,7 @@ async def get_edit_plan(
     analytics.capture(user_id, "edit_plan_generated", {
         "video_id": str(video_id), "plan_id": str(plan.id), "llm_generated": plan.llm_generated,
     })
-    return _plan_to_schema(plan, segs)
+    return _plan_to_schema(plan, segs, scene_map)
 
 
 # ── single version ─────────────────────────────────────────────────────────────
@@ -152,14 +191,15 @@ async def get_edit_plan(
 @router.get("/edit-plans/{plan_id}", response_model=EditPlanSchema)
 @limiter.limit(settings.rate_limit_default)
 async def get_edit_plan_by_id(
-    request,
+    request: Request,
     plan_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
     plan = await _get_plan_for_user(plan_id, user_id, db)
+    scene_map = await _load_scene_map(plan.video_id, db)
     segs = await _load_segments(plan.id, db)
-    return _plan_to_schema(plan, segs)
+    return _plan_to_schema(plan, segs, scene_map)
 
 
 # ── patch ──────────────────────────────────────────────────────────────────────
@@ -167,7 +207,7 @@ async def get_edit_plan_by_id(
 @router.patch("/edit-plans/{plan_id}", response_model=EditPlanSchema)
 @limiter.limit(settings.rate_limit_default)
 async def patch_edit_plan(
-    request,
+    request: Request,
     plan_id: uuid.UUID,
     body: EditPlanPatchRequest,
     db: AsyncSession = Depends(get_db),
@@ -180,39 +220,88 @@ async def patch_edit_plan(
             detail=f"Plan cannot be edited in status '{plan.status}' — only DRAFT plans are editable",
         )
 
-    segment_ids = {u.id for u in body.segments}
-    segs_result = await db.execute(
-        select(EditPlanSegment).where(
-            EditPlanSegment.edit_plan_id == plan.id,
-            EditPlanSegment.id.in_(segment_ids),
+    # Delete segments
+    if body.delete_ids:
+        del_result = await db.execute(
+            select(EditPlanSegment).where(
+                EditPlanSegment.edit_plan_id == plan.id,
+                EditPlanSegment.id.in_(body.delete_ids),
+            )
         )
-    )
-    seg_map = {s.id: s for s in segs_result.scalars().all()}
+        for seg in del_result.scalars().all():
+            await db.delete(seg)
 
-    for update in body.segments:
-        seg = seg_map.get(update.id)
-        if not seg:
-            raise HTTPException(status_code=404, detail=f"Segment {update.id} not found in this plan")
-        if update.action is not None:
-            seg.action = update.action
-        if update.caption is not None:
-            seg.caption = update.caption
-        if update.text_overlay is not None:
-            seg.text_overlay = update.text_overlay
-        if update.start_ts is not None:
-            seg.start_ts = update.start_ts
-        if update.end_ts is not None:
-            seg.end_ts = update.end_ts
-        if update.order is not None:
-            seg.order = update.order
+    # Update existing segments
+    if body.segments:
+        segment_ids = {u.id for u in body.segments}
+        segs_result = await db.execute(
+            select(EditPlanSegment).where(
+                EditPlanSegment.edit_plan_id == plan.id,
+                EditPlanSegment.id.in_(segment_ids),
+            )
+        )
+        seg_map = {s.id: s for s in segs_result.scalars().all()}
+
+        for update in body.segments:
+            seg = seg_map.get(update.id)
+            if not seg:
+                raise HTTPException(status_code=404, detail=f"Segment {update.id} not found in this plan")
+            if update.action is not None:
+                seg.action = update.action
+            if update.caption is not None:
+                seg.caption = update.caption
+            if update.text_overlay is not None:
+                seg.text_overlay = update.text_overlay
+            if update.start_ts is not None:
+                seg.start_ts = update.start_ts
+            if update.end_ts is not None:
+                seg.end_ts = update.end_ts
+            if update.order is not None:
+                seg.order = update.order
+            if update.brightness is not None:
+                seg.brightness = update.brightness
+            if update.contrast is not None:
+                seg.contrast = update.contrast
+            if update.saturation is not None:
+                seg.saturation = update.saturation
+            if update.fade_in is not None:
+                seg.fade_in = update.fade_in
+            if update.fade_out is not None:
+                seg.fade_out = update.fade_out
+            if update.effect is not None:
+                seg.effect = update.effect
+
+    # Create new segments (e.g. from splits)
+    for new_seg in body.create:
+        ps = EditPlanSegment(
+            edit_plan_id=plan.id,
+            scene_id=new_seg.scene_id,
+            action=new_seg.action,
+            caption=new_seg.caption,
+            text_overlay=new_seg.text_overlay,
+            start_ts=new_seg.start_ts,
+            end_ts=new_seg.end_ts,
+            order=new_seg.order,
+            brightness=new_seg.brightness,
+            contrast=new_seg.contrast,
+            saturation=new_seg.saturation,
+            fade_in=new_seg.fade_in,
+            fade_out=new_seg.fade_out,
+            effect=new_seg.effect,
+        )
+        db.add(ps)
 
     await db.flush()
     analytics.capture(user_id, "edit_plan_edited", {
-        "plan_id": str(plan_id), "segments_updated": len(body.segments),
+        "plan_id": str(plan_id),
+        "segments_updated": len(body.segments),
+        "segments_created": len(body.create),
+        "segments_deleted": len(body.delete_ids),
     })
     logger.info(f"Edit plan {plan_id} patched: {len(body.segments)} segment(s)")
+    scene_map = await _load_scene_map(plan.video_id, db)
     segs = await _load_segments(plan.id, db)
-    return _plan_to_schema(plan, segs)
+    return _plan_to_schema(plan, segs, scene_map)
 
 
 # ── approve ────────────────────────────────────────────────────────────────────
@@ -224,8 +313,9 @@ async def patch_edit_plan(
 )
 @limiter.limit(settings.rate_limit_agent)
 async def approve_edit_plan(
-    request,
+    request: Request,
     plan_id: uuid.UUID,
+    options: ExportOptions = Body(default_factory=ExportOptions),
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
@@ -236,24 +326,61 @@ async def approve_edit_plan(
             detail=f"Plan is already '{plan.status}' — only DRAFT plans can be approved",
         )
 
+    opts = options
+    # Validate preset exists
+    if opts.preset_id and opts.preset_id != "source":
+        from app.services.export_presets import get_preset
+        try:
+            preset = get_preset(opts.preset_id)
+            aspect = opts.aspect_ratio or preset.aspect_ratio
+        except KeyError:
+            raise HTTPException(status_code=400, detail=f"Unknown export preset: {opts.preset_id}")
+    else:
+        aspect = opts.aspect_ratio
+
+    if opts.brand_kit_id:
+        from app.models.brand_kit import BrandKit
+        kit_result = await db.execute(
+            select(BrandKit).where(
+                BrandKit.id == opts.brand_kit_id,
+                BrandKit.user_id == user_id,
+            )
+        )
+        if not kit_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Brand kit not found")
+
     plan.status = EditPlanStatus.APPROVED
     await db.flush()
 
-    job = RenderJob(edit_plan_id=plan.id, video_id=plan.video_id, status=RenderStatus.PENDING)
+    job = RenderJob(
+        edit_plan_id=plan.id,
+        video_id=plan.video_id,
+        status=RenderStatus.PENDING,
+        preset_id=opts.preset_id,
+        aspect_ratio=aspect,
+        burn_captions=opts.burn_captions,
+        brand_kit_id=opts.brand_kit_id,
+        options={"prefer_faces": opts.prefer_faces, "resolution": opts.resolution},
+    )
     db.add(job)
     await db.flush()
 
     from app.tasks.render_pipeline import render_video
     render_video.delay(str(job.id))
 
-    analytics.capture(user_id, "edit_plan_approved", {"plan_id": str(plan_id)})
+    analytics.capture(user_id, "edit_plan_approved", {
+        "plan_id": str(plan_id), "preset_id": opts.preset_id,
+    })
     analytics.capture(user_id, "render_started", {
         "render_job_id": str(job.id), "video_id": str(plan.video_id),
+        "preset_id": opts.preset_id,
     })
-    logger.info(f"Edit plan {plan_id} approved; render job {job.id} queued")
+    logger.info(f"Edit plan {plan_id} approved; render job {job.id} queued preset={opts.preset_id}")
     return RenderJobResponse(
         id=job.id, edit_plan_id=job.edit_plan_id, video_id=job.video_id,
         status=job.status, output_url=None, error_message=None,
+        preset_id=job.preset_id, aspect_ratio=job.aspect_ratio,
+        burn_captions=job.burn_captions,
         started_at=job.started_at, completed_at=job.completed_at, created_at=job.created_at,
     )
 
@@ -267,7 +394,7 @@ async def approve_edit_plan(
 )
 @limiter.limit(settings.rate_limit_agent)
 async def revise_edit_plan(
-    request,
+    request: Request,
     video_id: uuid.UUID,
     plan_id: uuid.UUID,
     body: ReviseRequest,
@@ -279,7 +406,6 @@ async def revise_edit_plan(
     current_plan = await _get_plan_for_user(plan_id, user_id, db)
     current_segs = await _load_segments(plan_id, db)
 
-    # Load context for the revision LLM
     scenes_result = await db.execute(
         select(Scene).where(Scene.video_id == video_id).order_by(Scene.scene_number)
     )
@@ -312,7 +438,6 @@ async def revise_edit_plan(
     except PlanningError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    # Determine next version number
     max_ver_result = await db.execute(
         select(EditPlan.version).where(EditPlan.video_id == video_id).order_by(EditPlan.version.desc())
     )
@@ -324,6 +449,7 @@ async def revise_edit_plan(
         llm_generated=True,
         version=max_ver + 1,
         parent_version_id=current_plan.id,
+        revision_instruction=body.instruction,
     )
     db.add(new_plan)
     await db.flush()
@@ -348,8 +474,9 @@ async def revise_edit_plan(
     })
     logger.info(f"Revised plan v{new_plan.version} created for video {video_id}")
 
+    scene_map = {s.id: s for s in scenes}
     new_segs = await _load_segments(new_plan.id, db)
-    return _plan_to_schema(new_plan, new_segs)
+    return _plan_to_schema(new_plan, new_segs, scene_map)
 
 
 # ── render job poll ────────────────────────────────────────────────────────────
@@ -357,7 +484,7 @@ async def revise_edit_plan(
 @router.get("/render-jobs/{job_id}", response_model=RenderJobResponse)
 @limiter.limit(settings.rate_limit_default)
 async def get_render_job(
-    request,
+    request: Request,
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
@@ -386,5 +513,40 @@ async def get_render_job(
     return RenderJobResponse(
         id=job.id, edit_plan_id=job.edit_plan_id, video_id=job.video_id,
         status=job.status, output_url=output_url, error_message=job.error_message,
+        preset_id=getattr(job, "preset_id", None),
+        aspect_ratio=getattr(job, "aspect_ratio", None),
+        burn_captions=getattr(job, "burn_captions", True),
         started_at=job.started_at, completed_at=job.completed_at, created_at=job.created_at,
     )
+
+
+@router.get("/videos/{video_id}/render-jobs", response_model=list[RenderJobResponse])
+@limiter.limit(settings.rate_limit_default)
+async def list_render_jobs(
+    request: Request,
+    video_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    """List render jobs for a video (newest first)."""
+    await _get_video_for_user(video_id, user_id, db)
+    result = await db.execute(
+        select(RenderJob)
+        .where(RenderJob.video_id == video_id)
+        .order_by(RenderJob.created_at.desc())
+        .limit(20)
+    )
+    jobs = result.scalars().all()
+    out: list[RenderJobResponse] = []
+    for job in jobs:
+        output_url = None
+        if job.status == RenderStatus.COMPLETE and job.output_key:
+            output_url = storage_service.presign_url(job.output_key)
+        out.append(RenderJobResponse(
+            id=job.id, edit_plan_id=job.edit_plan_id, video_id=job.video_id,
+            status=job.status, output_url=output_url, error_message=job.error_message,
+            preset_id=job.preset_id, aspect_ratio=job.aspect_ratio,
+            burn_captions=job.burn_captions,
+            started_at=job.started_at, completed_at=job.completed_at, created_at=job.created_at,
+        ))
+    return out

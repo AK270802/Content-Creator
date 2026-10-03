@@ -1,0 +1,1153 @@
+{
+  "info": {
+    "_postman_id": "b7f3a2d1-4c5e-4a8b-9f1d-2e3c4b5a6d7e",
+    "name": "Content Creation Platform",
+    "description": "Complete API collection for the AI-powered video content creation platform.\n\n## Quick Start\n1. Import this collection AND `Local.postman_environment.json`\n2. Select the **Local** environment in Postman\n3. Set `keycloak_client_secret` (Keycloak Admin → Clients → editor-api → Credentials tab)\n4. Run **Get Token (Password Grant)** once — subsequent requests auto-refresh the token\n\n## Happy-Path Workflow\n1. **Upload Video** → auto-captures `video_id`\n2. Poll **Get Video Status** until `status == READY`\n3. **Get Latest Edit Plan** → auto-captures `plan_id` + `segment_id`\n4. Optionally **Patch** or **Revise** the plan\n5. **Approve Edit Plan** → auto-captures `render_job_id`\n6. Poll **Get Render Job Status** until `status == COMPLETE` — grab `output_url`\n\n## Auth\nCollection-level Bearer auth injects `{{access_token}}` on every request. The pre-request script auto-refreshes the token when it expires (30 s buffer).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Skip auto-refresh for requests that are themselves auth calls",
+          "const SKIP = ['Get Token', 'Refresh Token', 'Get Admin Token', 'Client Credentials', 'Logout', 'Introspect Token'];",
+          "if (SKIP.some(n => (pm.info.requestName || '').includes(n))) return;",
+          "",
+          "const token  = pm.collectionVariables.get('access_token');",
+          "const expiry = parseInt(pm.collectionVariables.get('token_expiry') || '0');",
+          "if (token && Date.now() < expiry) return;",
+          "",
+          "const baseKC  = pm.collectionVariables.get('keycloak_url');",
+          "const realm   = pm.collectionVariables.get('keycloak_realm');",
+          "const cid     = pm.collectionVariables.get('keycloak_client_id');",
+          "const secret  = pm.collectionVariables.get('keycloak_client_secret');",
+          "const user    = pm.collectionVariables.get('admin_username');",
+          "const pass    = pm.collectionVariables.get('admin_password');",
+          "",
+          "if (!secret) {",
+          "  console.warn('[auto-refresh] keycloak_client_secret is empty — set it in the environment');",
+          "  return;",
+          "}",
+          "",
+          "pm.sendRequest({",
+          "  url: `${baseKC}/realms/${realm}/protocol/openid-connect/token`,",
+          "  method: 'POST',",
+          "  header: { 'Content-Type': 'application/x-www-form-urlencoded' },",
+          "  body: {",
+          "    mode: 'urlencoded',",
+          "    urlencoded: [",
+          "      { key: 'grant_type',    value: 'password' },",
+          "      { key: 'client_id',     value: cid        },",
+          "      { key: 'client_secret', value: secret     },",
+          "      { key: 'username',      value: user       },",
+          "      { key: 'password',      value: pass       }",
+          "    ]",
+          "  }",
+          "}, function(err, res) {",
+          "  if (!err && res.code === 200) {",
+          "    const b = res.json();",
+          "    pm.collectionVariables.set('access_token',  b.access_token);",
+          "    pm.collectionVariables.set('refresh_token', b.refresh_token || '');",
+          "    pm.collectionVariables.set('token_expiry',  String(Date.now() + (b.expires_in - 30) * 1000));",
+          "    console.log('[auto-refresh] Token refreshed, expires in', b.expires_in, 's');",
+          "  } else {",
+          "    console.warn('[auto-refresh] Failed — check keycloak_client_secret and credentials. Code:', res && res.code);",
+          "  }",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string",
+      "description": "FastAPI backend base URL"
+    },
+    {
+      "key": "keycloak_url",
+      "value": "http://localhost:8080",
+      "type": "string",
+      "description": "Keycloak server URL — no trailing slash"
+    },
+    {
+      "key": "keycloak_realm",
+      "value": "editor",
+      "type": "string"
+    },
+    {
+      "key": "keycloak_client_id",
+      "value": "editor-api",
+      "type": "string"
+    },
+    {
+      "key": "keycloak_client_secret",
+      "value": "",
+      "type": "string",
+      "description": "REQUIRED — Keycloak Admin > Clients > editor-api > Credentials tab"
+    },
+    {
+      "key": "admin_username",
+      "value": "admin",
+      "type": "string"
+    },
+    {
+      "key": "admin_password",
+      "value": "Admin@1234!",
+      "type": "string",
+      "description": "Default from config.py — change in production"
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated by Get Token requests"
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "token_expiry",
+      "value": "0",
+      "type": "string",
+      "description": "Unix ms — managed automatically by pre-request script"
+    },
+    {
+      "key": "video_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-set after Upload Video"
+    },
+    {
+      "key": "plan_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-set after Get Latest Edit Plan"
+    },
+    {
+      "key": "render_job_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-set after Approve Edit Plan"
+    },
+    {
+      "key": "scene_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-set after Get Video Scenes (first scene)"
+    },
+    {
+      "key": "segment_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-set after Get Latest Edit Plan (first segment)"
+    },
+    {
+      "key": "keycloak_admin_token",
+      "value": "",
+      "type": "string",
+      "description": "Admin-realm token — set by Get Admin Token"
+    },
+    {
+      "key": "keycloak_user_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-set after Create User (from Location header)"
+    }
+  ],
+  "item": [
+    {
+      "name": "🔐 Keycloak Auth",
+      "description": "OpenID Connect token endpoints for the editor realm. All requests in this folder bypass the collection Bearer auth.",
+      "auth": { "type": "noauth" },
+      "item": [
+        {
+          "name": "Get Token (Password Grant)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('access_token',  b.access_token);",
+                  "  pm.collectionVariables.set('refresh_token', b.refresh_token || '');",
+                  "  pm.collectionVariables.set('token_expiry',  String(Date.now() + (b.expires_in - 30) * 1000));",
+                  "  console.log('access_token set — expires in', b.expires_in, 's');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type",    "value": "password",                    "type": "text" },
+                { "key": "client_id",     "value": "{{keycloak_client_id}}",      "type": "text" },
+                { "key": "client_secret", "value": "{{keycloak_client_secret}}",  "type": "text" },
+                { "key": "username",      "value": "{{admin_username}}",          "type": "text" },
+                { "key": "password",      "value": "{{admin_password}}",          "type": "text" },
+                { "key": "scope",         "value": "openid profile email",        "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/protocol/openid-connect/token",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", "protocol", "openid-connect", "token"]
+            },
+            "description": "Exchange username + password for access/refresh tokens. Tokens are saved to collection variables automatically."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Token (Client Credentials)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('access_token', b.access_token);",
+                  "  pm.collectionVariables.set('token_expiry', String(Date.now() + (b.expires_in - 30) * 1000));",
+                  "  console.log('Client credentials token set');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type",    "value": "client_credentials",          "type": "text" },
+                { "key": "client_id",     "value": "{{keycloak_client_id}}",      "type": "text" },
+                { "key": "client_secret", "value": "{{keycloak_client_secret}}",  "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/protocol/openid-connect/token",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", "protocol", "openid-connect", "token"]
+            },
+            "description": "Machine-to-machine grant — no user account required."
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('access_token',  b.access_token);",
+                  "  pm.collectionVariables.set('refresh_token', b.refresh_token || '');",
+                  "  pm.collectionVariables.set('token_expiry',  String(Date.now() + (b.expires_in - 30) * 1000));",
+                  "  console.log('Token refreshed');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type",    "value": "refresh_token",               "type": "text" },
+                { "key": "client_id",     "value": "{{keycloak_client_id}}",      "type": "text" },
+                { "key": "client_secret", "value": "{{keycloak_client_secret}}",  "type": "text" },
+                { "key": "refresh_token", "value": "{{refresh_token}}",           "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/protocol/openid-connect/token",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", "protocol", "openid-connect", "token"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Introspect Token",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "token",         "value": "{{access_token}}",            "type": "text" },
+                { "key": "client_id",     "value": "{{keycloak_client_id}}",      "type": "text" },
+                { "key": "client_secret", "value": "{{keycloak_client_secret}}",  "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/protocol/openid-connect/token/introspect",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", "protocol", "openid-connect", "token", "introspect"]
+            },
+            "description": "Returns `active: true/false` and all token claims. Useful for debugging JWT contents."
+          },
+          "response": []
+        },
+        {
+          "name": "Get User Info",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/protocol/openid-connect/userinfo",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", "protocol", "openid-connect", "userinfo"]
+            },
+            "description": "Returns sub, email, name, and configured claims for the current access token."
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 204', () => pm.response.to.have.status(204));",
+                  "pm.collectionVariables.set('access_token',  '');",
+                  "pm.collectionVariables.set('refresh_token', '');",
+                  "pm.collectionVariables.set('token_expiry',  '0');",
+                  "console.log('Session ended — tokens cleared');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "client_id",     "value": "{{keycloak_client_id}}",      "type": "text" },
+                { "key": "client_secret", "value": "{{keycloak_client_secret}}",  "type": "text" },
+                { "key": "refresh_token", "value": "{{refresh_token}}",           "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/protocol/openid-connect/logout",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", "protocol", "openid-connect", "logout"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "OIDC Discovery",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/.well-known/openid-configuration",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", ".well-known", "openid-configuration"]
+            },
+            "description": "OIDC discovery document listing all endpoint URLs, scopes, and response types."
+          },
+          "response": []
+        },
+        {
+          "name": "Get JWKS (Public Keys)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{keycloak_url}}/realms/{{keycloak_realm}}/protocol/openid-connect/certs",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "{{keycloak_realm}}", "protocol", "openid-connect", "certs"]
+            },
+            "description": "Public signing keys (JWK Set) used by the API backend to verify JWT signatures."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "👑 Keycloak Admin",
+      "description": "Keycloak Admin REST API. Run **Get Admin Token** first — all other requests use `{{keycloak_admin_token}}` via a manual Authorization header (not the collection Bearer).",
+      "auth": { "type": "noauth" },
+      "item": [
+        {
+          "name": "Get Admin Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('keycloak_admin_token', b.access_token);",
+                  "  console.log('Admin token set, expires in', b.expires_in, 's');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "password",            "type": "text" },
+                { "key": "client_id",  "value": "admin-cli",           "type": "text" },
+                { "key": "username",   "value": "{{admin_username}}",  "type": "text" },
+                { "key": "password",   "value": "{{admin_password}}",  "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/realms/master/protocol/openid-connect/token",
+              "host": ["{{keycloak_url}}"],
+              "path": ["realms", "master", "protocol", "openid-connect", "token"]
+            },
+            "description": "Gets a master-realm admin token via admin-cli (no client secret required). Required for all admin operations below."
+          },
+          "response": []
+        },
+        {
+          "name": "List Users",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users?max=50",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users"],
+              "query": [
+                { "key": "max",    "value": "50",  "description": "Max records to return" },
+                { "key": "search", "value": "",    "disabled": true, "description": "Search by username/email/name" },
+                { "key": "first",  "value": "0",   "disabled": true, "description": "Pagination offset" }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const loc = pm.response.headers.get('Location');",
+                  "if (loc) {",
+                  "  const uid = loc.split('/').pop();",
+                  "  pm.collectionVariables.set('keycloak_user_id', uid);",
+                  "  console.log('keycloak_user_id set:', uid);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" },
+              { "key": "Content-Type",  "value": "application/json",               "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"testuser\",\n  \"email\": \"testuser@example.com\",\n  \"firstName\": \"Test\",\n  \"lastName\": \"User\",\n  \"enabled\": true,\n  \"emailVerified\": true,\n  \"credentials\": [\n    {\n      \"type\": \"password\",\n      \"value\": \"TestPass123!\",\n      \"temporary\": false\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users"]
+            },
+            "description": "Returns 201 with a `Location` header containing the new user UUID."
+          },
+          "response": []
+        },
+        {
+          "name": "Get User by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users/{{keycloak_user_id}}",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users", "{{keycloak_user_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update User",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" },
+              { "key": "Content-Type",  "value": "application/json",               "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"updated@example.com\",\n  \"firstName\": \"Updated\",\n  \"lastName\": \"Name\",\n  \"enabled\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users/{{keycloak_user_id}}",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users", "{{keycloak_user_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reset User Password",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" },
+              { "key": "Content-Type",  "value": "application/json",               "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"password\",\n  \"value\": \"NewPassword123!\",\n  \"temporary\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users/{{keycloak_user_id}}/reset-password",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users", "{{keycloak_user_id}}", "reset-password"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete User",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users/{{keycloak_user_id}}",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users", "{{keycloak_user_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get User Sessions",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users/{{keycloak_user_id}}/sessions",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users", "{{keycloak_user_id}}", "sessions"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Send Verify Email",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/users/{{keycloak_user_id}}/send-verify-email",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "users", "{{keycloak_user_id}}", "send-verify-email"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Realm Clients",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}/clients",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}", "clients"]
+            },
+            "description": "Lists all clients. Useful for locating the internal UUID of `editor-api` (needed for some admin sub-endpoints)."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Realm Info",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{keycloak_admin_token}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{keycloak_url}}/admin/realms/{{keycloak_realm}}",
+              "host": ["{{keycloak_url}}"],
+              "path": ["admin", "realms", "{{keycloak_realm}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "❤️ Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status is ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/health",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "health"]
+            },
+            "description": "Returns `{\"status\": \"ok\", \"version\": \"...\"}`. No authentication required."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "🎬 Videos",
+      "description": "Video upload and processing pipeline. Requires valid JWT (auto-injected).",
+      "item": [
+        {
+          "name": "Upload Video",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 202', () => pm.response.to.have.status(202));",
+                  "if (pm.response.code === 202) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('video_id', b.video_id);",
+                  "  console.log('video_id set:', b.video_id);",
+                  "  pm.test('Has video_id', () => pm.expect(b.video_id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select a video file (.mp4, .mov, .avi, .mkv, .webm) — max 2 GB"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/videos/upload",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "videos", "upload"]
+            },
+            "description": "Streams the file to MinIO then enqueues the full processing pipeline: Whisper transcription → PySceneDetect scene boundary detection → event timeline extraction → AI edit plan generation.\n\nReturns 202 immediately. Rate limit: 5/minute.\n\nAllowed types: video/mp4, video/quicktime, video/x-msvideo, video/x-matroska, video/webm, video/mpeg"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Video Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  console.log('Video status:', b.status);",
+                  "  if (b.status === 'FAILED') console.error('Processing error:', b.error_message);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/videos/{{video_id}}/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "videos", "{{video_id}}", "status"]
+            },
+            "description": "Poll until `status == READY`. Possible values: `PENDING` → `PROCESSING` → `READY` or `FAILED`."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Video Scenes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const scenes = pm.response.json();",
+                  "  pm.test('Returns array', () => pm.expect(scenes).to.be.an('array'));",
+                  "  if (scenes.length > 0) {",
+                  "    pm.collectionVariables.set('scene_id', scenes[0].id);",
+                  "    console.log('scene_id set:', scenes[0].id, '— total scenes:', scenes.length);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/videos/{{video_id}}/scenes",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "videos", "{{video_id}}", "scenes"]
+            },
+            "description": "Returns ordered scenes with `scene_number`, `start_time`, `end_time`, and presigned `thumbnail_url`. Requires video `READY`."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Video Transcript",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  console.log('Total segments:', b.total, '| page:', b.page, '| returned:', b.segments.length);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/videos/{{video_id}}/transcript?page=1&page_size=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "videos", "{{video_id}}", "transcript"],
+              "query": [
+                { "key": "page",      "value": "1",   "description": "1-based page number" },
+                { "key": "page_size", "value": "50",  "description": "Items per page (1–200, default 50)" }
+              ]
+            },
+            "description": "Paginated transcript segments from Whisper. Each segment has `start_time`, `end_time`, `text`, and optional `speaker`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "✂️ Edit Plans",
+      "description": "AI-generated versioned edit plans. Each plan contains segments with actions (`keep`/`cut`/`trim`), captions, text overlays, and trim points. Plans are scoped to the authenticated user via video ownership.",
+      "item": [
+        {
+          "name": "List Edit Plan Versions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const plans = pm.response.json();",
+                  "  console.log('Plan versions:', plans.length);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/videos/{{video_id}}/edit-plans",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "videos", "{{video_id}}", "edit-plans"]
+            },
+            "description": "Returns all plan versions for the video ordered by version ascending (v1, v2, …)."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Latest Edit Plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('plan_id', b.id);",
+                  "  if (b.segments && b.segments.length > 0) {",
+                  "    pm.collectionVariables.set('segment_id', b.segments[0].id);",
+                  "    console.log('segment_id set:', b.segments[0].id);",
+                  "  }",
+                  "  console.log('plan_id set:', b.id, '| version:', b.version, '| segments:', b.segments.length);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/videos/{{video_id}}/edit-plan",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "videos", "{{video_id}}", "edit-plan"]
+            },
+            "description": "Returns the highest-version plan. Auto-captures `plan_id` and `segment_id`."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Edit Plan by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/edit-plans/{{plan_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "edit-plans", "{{plan_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Edit Plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 409) {",
+                  "  console.warn('Plan is not DRAFT — cannot patch. Detail:', pm.response.json().detail);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"segments\": [\n    {\n      \"id\": \"{{segment_id}}\",\n      \"action\": \"keep\",\n      \"caption\": \"Updated caption for this scene\",\n      \"text_overlay\": \"Text overlay content\",\n      \"start_ts\": 0.0,\n      \"end_ts\": 15.5,\n      \"order\": 0\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/edit-plans/{{plan_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "edit-plans", "{{plan_id}}"]
+            },
+            "description": "Partially updates segments in a DRAFT plan. Only `DRAFT` plans are editable (409 otherwise).\n\nAll segment fields are optional — only provided fields are updated.\n\n`action` values: `keep`, `cut`, `trim`"
+          },
+          "response": []
+        },
+        {
+          "name": "Approve Edit Plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 202', () => pm.response.to.have.status(202));",
+                  "if (pm.response.code === 202) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('render_job_id', b.id);",
+                  "  console.log('render_job_id set:', b.id, '| render status:', b.status);",
+                  "}",
+                  "if (pm.response.code === 409) {",
+                  "  console.warn('Plan is not DRAFT — cannot approve. Detail:', pm.response.json().detail);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/edit-plans/{{plan_id}}/approve",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "edit-plans", "{{plan_id}}", "approve"]
+            },
+            "description": "Transitions plan `DRAFT → APPROVED` and enqueues an FFmpeg render job. Returns 202 with the render job. Poll `/render-jobs/{id}` until `COMPLETE`.\n\nRate limit: 10/minute."
+          },
+          "response": []
+        },
+        {
+          "name": "Revise Edit Plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('plan_id', b.id);",
+                  "  console.log('New plan v' + b.version + ' created. plan_id updated:', b.id);",
+                  "}",
+                  "if (pm.response.code === 429) {",
+                  "  console.warn('Daily revision cap hit:', pm.response.json().detail);",
+                  "}",
+                  "if (pm.response.code === 502) {",
+                  "  console.error('Revision LLM error:', pm.response.json().detail);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"instruction\": \"Remove all scenes where no one is speaking and tighten the pacing to under 3 minutes\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/videos/{{video_id}}/edit-plans/{{plan_id}}/revise",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "videos", "{{video_id}}", "edit-plans", "{{plan_id}}", "revise"]
+            },
+            "description": "Sends the current plan + transcript + timeline events to the revision LLM with the given instruction. Creates a new plan version (v+1) as a child of the current plan.\n\nReturns 201 with the new plan. `plan_id` is auto-updated.\n\nRate limit: 10/minute. Daily cap: 20 revisions/user/day (429 when exceeded)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "🎞️ Render Jobs",
+      "description": "Poll render job status after approving an edit plan. Render is processed by a Celery worker using FFmpeg.",
+      "item": [
+        {
+          "name": "Get Render Job Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  console.log('Render status:', b.status);",
+                  "  if (b.status === 'COMPLETE') console.log('Output URL:', b.output_url);",
+                  "  if (b.status === 'FAILED')   console.error('Render error:', b.error_message);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/render-jobs/{{render_job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "render-jobs", "{{render_job_id}}"]
+            },
+            "description": "Polls the render job. Status values: `PENDING` → `PROCESSING` → `COMPLETE` or `FAILED`.\n\nWhen `COMPLETE`, `output_url` contains a presigned MinIO URL for the rendered video (valid ~1 hour)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "🤖 Agent",
+      "description": "Direct AI agent endpoint for single-shot edit plan generation.",
+      "item": [
+        {
+          "name": "Agent Edit",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  console.log('LLM available:', b.llm_available, '| operations:', b.edit_plan.operations.length);",
+                  "  if (!b.llm_available) console.warn('LLM unavailable — rule-based fallback used');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"video_id\": \"{{video_id}}\",\n  \"instruction\": \"Create a 3-minute highlight reel focusing on the key talking points. Remove all pauses and filler words.\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/agent/edit",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "agent", "edit"]
+            },
+            "description": "Generates an edit plan synchronously using the planning LLM. Video must be `READY`.\n\n`llm_available: false` means the LLM was unreachable and a rule-based fallback plan was used.\n\nRate limit: 10/minute."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "📊 Monitoring",
+      "description": "Observability endpoints — no authentication required.",
+      "auth": { "type": "noauth" },
+      "item": [
+        {
+          "name": "Prometheus Metrics",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["metrics"]
+            },
+            "description": "Exposes Prometheus-format metrics (HTTP durations, request counts, status codes) from prometheus-fastapi-instrumentator."
+          },
+          "response": []
+        },
+        {
+          "name": "API Docs (Swagger UI)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/docs",
+              "host": ["{{base_url}}"],
+              "path": ["docs"]
+            },
+            "description": "Interactive Swagger UI. Only available when `DEBUG=true` is set in the backend environment."
+          },
+          "response": []
+        },
+        {
+          "name": "API Docs (ReDoc)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/redoc",
+              "host": ["{{base_url}}"],
+              "path": ["redoc"]
+            },
+            "description": "ReDoc documentation UI. Only available when `DEBUG=true`."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

@@ -39,6 +39,7 @@ class EditPlan(Base):
     parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("edit_plans.id", ondelete="SET NULL"), nullable=True
     )
+    revision_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=text("now()"), nullable=False
     )
@@ -75,5 +76,12 @@ class EditPlanSegment(Base):
     start_ts: Mapped[float | None] = mapped_column(nullable=True)
     end_ts: Mapped[float | None] = mapped_column(nullable=True)
     order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Visual effects (1.0 = neutral for brightness/contrast/saturation)
+    brightness: Mapped[float | None] = mapped_column(nullable=True)
+    contrast: Mapped[float | None] = mapped_column(nullable=True)
+    saturation: Mapped[float | None] = mapped_column(nullable=True)
+    fade_in: Mapped[float | None] = mapped_column(nullable=True)
+    fade_out: Mapped[float | None] = mapped_column(nullable=True)
+    effect: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     edit_plan: Mapped["EditPlan"] = relationship("EditPlan", back_populates="segments")

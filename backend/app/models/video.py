@@ -24,6 +24,8 @@ class Video(Base):
         SAEnum(VideoStatus), nullable=False, default=VideoStatus.PENDING
     )
     s3_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    thumbnail_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    proxy_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     file_size_bytes: Mapped[int | None] = mapped_column(nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
