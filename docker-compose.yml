@@ -149,13 +149,12 @@ services:
       - editor-net
 
   # ------------------------------------------------------------------
-  # Celery worker (analysis + render pipeline)
-  # Build context assumes a Dockerfile at ./backend using requirements.txt
+  # Celery worker (analysis + render pipeline) — CPU only
   # ------------------------------------------------------------------
   celery-worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    # Reuses the image built by the api service (same code, CPU-only)
+    image: reelzoy-backend:latest
+    pull_policy: never
     container_name: editor-celery-worker
     restart: unless-stopped
     command: celery -A app.worker worker --loglevel=info --concurrency=2
@@ -175,17 +174,9 @@ services:
       - postgres
       - qdrant
       - minio
+      - api
     networks:
       - editor-net
-    # GPU access for inference tasks (Whisper / Qwen3-VL / planning LLM)
-    # Requires nvidia-container-toolkit on the host.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
   # ------------------------------------------------------------------
   # FastAPI app (native JWT auth — register/login/MFA via /api/v1/auth)
@@ -193,6 +184,7 @@ services:
   # Frontend (lumina-edit): https://reelzoy.com (port 3000)
   # ------------------------------------------------------------------
   api:
+    image: reelzoy-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
