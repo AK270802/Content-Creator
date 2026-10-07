@@ -77,18 +77,20 @@ services:
   # Object storage (raw + processed video, S3-compatible)
   # ------------------------------------------------------------------
   minio:
-    image: minio/minio:latest
+    # minio/minio was removed from Docker Hub (Sep 2026) and quay.io now needs
+    # auth; bitnamilegacy wraps the same server binary (no longer updated).
+    image: bitnamilegacy/minio:latest
     container_name: editor-minio
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
+      MINIO_CONSOLE_PORT_NUMBER: "9001"
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
     ports:
       - "9000:9000"   # API
       - "9001:9001"   # Console
     volumes:
-      - minio-data:/data
+      - minio-data:/bitnami/minio/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 15s
