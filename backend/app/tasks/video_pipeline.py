@@ -168,17 +168,33 @@ def process_video(self, video_id: str) -> dict:
                 logger.warning(f"Proxy generation failed (non-fatal) for {video_id}: {exc}")
 
             # ── Step 4: Extract audio ────────────────────────────────────────
+            # Videos without an audio track (or with a broken one) skip
+            # transcription instead of failing the whole pipeline.
             import ffmpeg as _ffmpeg
-            (
-                _ffmpeg
-                .input(video_path)
-                .output(audio_path, vn=None, acodec="pcm_s16le", ar=16000, ac=1)
-                .overwrite_output()
-                .run(quiet=True)
-            )
+            transcript = []
+            try:
+                has_audio = any(
+                    s.get("codec_type") == "audio"
+                    for s in _ffmpeg.probe(video_path).get("streams", [])
+                )
+                if has_audio:
+                    (
+                        _ffmpeg
+                        .input(video_path)
+                        .output(audio_path, vn=None, acodec="pcm_s16le", ar=16000, ac=1)
+                        .overwrite_output()
+                        .run(capture_stdout=True, capture_stderr=True)
+                    )
+                else:
+                    logger.info(f"No audio stream in video {video_id} — skipping transcription")
+            except _ffmpeg.Error as exc:
+                stderr = (exc.stderr or b"").decode(errors="replace")[-1000:]
+                logger.warning(f"Audio extraction failed (non-fatal) for {video_id}: {stderr}")
+                has_audio = False
 
             # ── Step 5: Transcription ────────────────────────────────────────
-            transcript = transcription_service.transcribe(audio_path)
+            if has_audio:
+                transcript = transcription_service.transcribe(audio_path)
             segment_objs = []
             for seg_data in transcript:
                 seg = Segment(
