@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Union
 
 import pyotp
+from loguru import logger
 from cryptography.fernet import Fernet
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -122,16 +123,16 @@ def decode_access_token(token: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Email (stubbed — wire up SMTP in production)
+# Email (SMTP via aiosmtplib)
 # ---------------------------------------------------------------------------
 
 async def _send_email(to: str, subject: str, body: str) -> None:
+    if not getattr(settings, "smtp_host", None):
+        logger.warning(f"SMTP disabled — email to {to} not sent. Subject: {subject}. Body: {body}")
+        return
     try:
         import aiosmtplib
         from email.mime.text import MIMEText
-
-        if not getattr(settings, "smtp_host", None):
-            return
 
         msg = MIMEText(body, "html")
         msg["Subject"] = subject
@@ -146,8 +147,10 @@ async def _send_email(to: str, subject: str, body: str) -> None:
             username=getattr(settings, "smtp_username", None),
             password=getattr(settings, "smtp_password", None),
         )
-    except Exception:
-        pass  # log in production; never raise so auth ops always succeed
+        logger.info(f"Email sent to {to}: {subject}")
+    except Exception as exc:
+        # never raise so auth ops always succeed, but make failures visible
+        logger.error(f"Failed to send email to {to} via {settings.smtp_host}:{settings.smtp_port}: {exc!r}")
 
 
 # ---------------------------------------------------------------------------
