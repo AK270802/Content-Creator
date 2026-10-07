@@ -1,4 +1,4 @@
-﻿import os
+import os
 import base64
 import json
 import tempfile
@@ -56,12 +56,10 @@ class VisionService:
         )
 
     def _call_vision_llm(self, frame_paths: list[str]) -> dict:
-        from openai import OpenAI
+        from app.services.llm_provider import make_client, vision_endpoint
 
-        client = OpenAI(
-            base_url=settings.vision_model_base_url or None,
-            api_key="not-needed",
-        )
+        ep = vision_endpoint()
+        client = make_client(ep)
 
         content: list[dict] = [{"type": "text", "text": self._build_prompt()}]
         for fp in frame_paths:
@@ -72,7 +70,7 @@ class VisionService:
             })
 
         resp = client.chat.completions.create(
-            model=settings.vision_model_name,
+            model=ep.model,
             messages=[{"role": "user", "content": content}],
             max_tokens=512,
             temperature=0.1,
@@ -90,7 +88,8 @@ class VisionService:
         Returns empty defaults if vision model is not configured or call fails.
         """
         empty = {"description": None, "visual_tags": [], "quality_flags": {}}
-        if not settings.vision_model_base_url:
+        from app.services.llm_provider import vision_endpoint
+        if not vision_endpoint().configured:
             return empty
 
         try:

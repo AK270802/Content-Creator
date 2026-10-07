@@ -1,4 +1,4 @@
-﻿"""
+"""
 EventTimelineService
 
 Chunks a video into 15-30s windows (snapped to existing scene cut points),
@@ -38,7 +38,8 @@ class EventTimelineService:
           [{chunk_id, start_ts, end_ts, description, tags, confidence}]
         Returns [] when no vision model is configured.
         """
-        if not settings.vision_model_base_url:
+        from app.services.llm_provider import vision_endpoint
+        if not vision_endpoint().configured:
             logger.info("No vision model configured — skipping timeline extraction")
             return []
 
@@ -121,11 +122,19 @@ class EventTimelineService:
     def _process_chunk(
         self, clip_path: str, chunk_start: float, chunk_end: float, chunk_id: int
     ) -> list[dict]:
-        with open(clip_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-
+        from app.services.llm_provider import vision_input_mode
         prompt = self._build_prompt(chunk_start, chunk_end)
-        raw = self._call_vision_llm(b64, prompt)
+        if vision_input_mode() == "frames":
+            parts = self._frame_parts(clip_path, chunk_end - chunk_start)
+            prompt += (
+                " You are given still frames sampled across the clip instead of the "
+                "video itself; use the labelled frame times to estimate timestamps."
+            )
+        else:
+            with open(clip_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            parts = [{"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{b64}"}}]
+        raw = self._call_vision_llm(parts, prompt)
         return self._parse_events(raw, chunk_start, chunk_id)
 
     def _build_prompt(self, chunk_start: float, chunk_end: float) -> str:
@@ -141,24 +150,40 @@ class EventTimelineService:
             "Timestamps are relative to the START of this clip."
         )
 
-    def _call_vision_llm(self, video_b64: str, prompt: str) -> dict:
-        from openai import OpenAI
-        client = OpenAI(
-            base_url=settings.vision_model_base_url or None,
-            api_key="not-needed",
-        )
+    def _frame_parts(self, clip_path: str, duration: float) -> list[dict]:
+        """Sample vision_frame_count JPEG frames evenly across the clip."""
+        import subprocess
+        n = max(1, settings.vision_frame_count)
+        parts: list[dict] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(n):
+                ts = duration * (i + 0.5) / n
+                out = os.path.join(tmpdir, f"f{i}.jpg")
+                subprocess.run(
+                    ["ffmpeg", "-y", "-ss", f"{ts:.3f}", "-i", clip_path,
+                     "-frames:v", "1", "-vf", "scale=768:-2", "-q:v", "4", out],
+                    capture_output=True,
+                )
+                if not os.path.exists(out):
+                    continue
+                with open(out, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                parts.append({"type": "text", "text": f"Frame at {ts:.1f}s:"})
+                parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        if not parts:
+            raise RuntimeError("frame extraction produced no images")
+        return parts
+
+    def _call_vision_llm(self, media_parts: list[dict], prompt: str) -> dict:
+        from app.services.llm_provider import make_client, vision_endpoint
+        ep = vision_endpoint()
+        client = make_client(ep)
         resp = client.chat.completions.create(
-            model=settings.vision_model_name,
+            model=ep.model,
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "video_url",
-                            "video_url": {"url": f"data:video/mp4;base64,{video_b64}"},
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
+                    "content": [*media_parts, {"type": "text", "text": prompt}],
                 }
             ],
             max_tokens=1024,

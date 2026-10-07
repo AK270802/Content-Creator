@@ -19,11 +19,9 @@ class TranslatedSegment:
     status: str = "translated"
 
 
-def _llm_base() -> tuple[str, str]:
-    from app.config import settings
-    base = (settings.planning_model_base_url or settings.vllm_base_url or "").rstrip("/")
-    model = settings.planning_model_name or settings.vllm_model
-    return base, model
+def _llm_endpoint():
+    from app.services.llm_provider import text_endpoint
+    return text_endpoint()
 
 
 def translate_segments(
@@ -33,9 +31,9 @@ def translate_segments(
 ) -> tuple[list[TranslatedSegment], bool]:
     """Translate transcript segments. Returns (results, used_llm)."""
     target = LANG_NAMES.get(target_language, target_language)
-    base, model = _llm_base()
+    ep = _llm_endpoint()
 
-    if not base or not segments:
+    if ep is None or not segments:
         return [
             TranslatedSegment(
                 start=s["start"],
@@ -58,14 +56,11 @@ def translate_segments(
     )
 
     try:
-        from openai import OpenAI
+        from app.services.llm_provider import make_client
 
-        client = OpenAI(
-            base_url=f"{base}/v1" if not base.endswith("/v1") else base,
-            api_key="local",
-        )
+        client = make_client(ep)
         resp = client.chat.completions.create(
-            model=model,
+            model=ep.model,
             messages=[
                 {"role": "system", "content": "You are a precise translator. Output valid JSON only."},
                 {"role": "user", "content": prompt},

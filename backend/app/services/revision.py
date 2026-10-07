@@ -1,4 +1,4 @@
-﻿"""
+"""
 RevisionService
 
 Loads an existing EditPlan + context (timeline events, transcript) and calls
@@ -14,6 +14,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.config import settings
+from app.services.llm_provider import planning_endpoint
 from app.schemas.edit_plan import LLMPlan
 from app.services.planning import PlanningError
 
@@ -36,7 +37,7 @@ class RevisionService:
         Falls back to PlanningError (not a silent template) because revision
         requires understanding the instruction — a template would ignore it.
         """
-        if not settings.planning_model_base_url:
+        if not planning_endpoint().configured:
             raise PlanningError("No planning LLM configured — revision requires an LLM endpoint")
 
         prompt = self._build_prompt(
@@ -130,13 +131,11 @@ class RevisionService:
 
     def _call_llm(self, prompt: str) -> dict:
         import json as _json
-        from openai import OpenAI
-        client = OpenAI(
-            base_url=settings.planning_model_base_url or None,
-            api_key="not-needed",
-        )
+        from app.services.llm_provider import make_client, planning_endpoint
+        ep = planning_endpoint()
+        client = make_client(ep)
         resp = client.chat.completions.create(
-            model=settings.planning_model_name,
+            model=ep.model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2048,
             temperature=settings.planning_temperature,

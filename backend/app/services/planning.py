@@ -1,8 +1,9 @@
-﻿import json
+import json
 from loguru import logger
 from pydantic import ValidationError
 
 from app.config import settings
+from app.services.llm_provider import planning_endpoint
 from app.schemas.edit_plan import LLMPlan, LLMPlanSegment
 from app.models.edit_plan import EditSegmentAction
 
@@ -86,13 +87,11 @@ class PlanningService:
         return base
 
     def _call_llm(self, prompt: str) -> dict:
-        from openai import OpenAI
-        client = OpenAI(
-            base_url=settings.planning_model_base_url or None,
-            api_key="not-needed",
-        )
+        from app.services.llm_provider import make_client, planning_endpoint
+        ep = planning_endpoint()
+        client = make_client(ep)
         resp = client.chat.completions.create(
-            model=settings.planning_model_name,
+            model=ep.model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2048,
             temperature=settings.planning_temperature,
@@ -125,7 +124,7 @@ class PlanningService:
         return LLMPlan(segments=segments)
 
     def generate_plan(self, video_id: str, scenes: list, segments: list, timeline_events: list | None = None) -> LLMPlan:
-        if not settings.planning_model_base_url:
+        if not planning_endpoint().configured:
             logger.info(f"No planning LLM configured — using template plan for {video_id}")
             return self._template_plan(video_id, scenes)
 
@@ -150,7 +149,7 @@ class _PlanningServiceWithTracker(PlanningService):
         self._last_llm_used = False
 
     def generate_plan(self, video_id, scenes, segments, timeline_events=None):
-        if not settings.planning_model_base_url:
+        if not planning_endpoint().configured:
             self._last_llm_used = False
         else:
             self._last_llm_used = True

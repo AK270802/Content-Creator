@@ -100,16 +100,18 @@ JSON array:"""
 
 
 async def _call_llm(prompt: str) -> str | None:
-    base = settings.planning_model_base_url or settings.vllm_base_url
-    if not base:
+    from app.services.llm_provider import text_endpoint
+    ep = text_endpoint()
+    if ep is None:
         return None
-    model = settings.planning_model_name or settings.vllm_model
+    headers = {"Authorization": f"Bearer {ep.api_key}"} if ep.api_key else {}
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
-                f"{base.rstrip('/')}/v1/chat/completions",
+                f"{ep.base_url.rstrip('/')}/chat/completions",
+                headers=headers,
                 json={
-                    "model": model,
+                    "model": ep.model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.3,
                     "max_tokens": 1500,
@@ -222,8 +224,8 @@ async def detect_smart_clips(
 
     total_duration = segments[-1].end_time if segments else 0.0
 
-    base_url = settings.planning_model_base_url or settings.vllm_base_url
-    if not base_url:
+    from app.services.llm_provider import text_endpoint
+    if text_endpoint() is None:
         clips = _heuristic_clips(segments, events, target_duration, max_clips)
         return SmartClipsResult(video_id=video_id, clips=clips, total_analyzed=total_duration)
 

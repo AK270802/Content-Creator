@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from typing import TypedDict
 from loguru import logger
 
@@ -32,8 +32,14 @@ def _build_template_plan(video_id: str, instruction: str, scenes: list[dict]) ->
 
 
 def run_agent(video_id: str, instruction: str, transcript: list[dict], scenes: list[dict]) -> tuple[EditPlan, bool]:
-    if not settings.vllm_base_url:
-        logger.info("vLLM not configured, returning template plan")
+    from app.services.llm_provider import planning_endpoint
+    ep = planning_endpoint()
+    if settings.vllm_base_url:
+        base_url, model, api_key = settings.vllm_base_url, settings.vllm_model, "not-needed"
+    elif ep.configured:
+        base_url, model, api_key = ep.base_url, ep.model, ep.api_key
+    else:
+        logger.info("No LLM configured, returning template plan")
         return _build_template_plan(video_id, instruction, scenes), False
 
     try:
@@ -42,10 +48,10 @@ def run_agent(video_id: str, instruction: str, transcript: list[dict], scenes: l
         import json
 
         llm = ChatOpenAI(
-            base_url=settings.vllm_base_url,
-            model=settings.vllm_model,
+            base_url=base_url,
+            model=model,
             temperature=settings.llm_temperature,
-            api_key="not-needed",
+            api_key=api_key,
         )
 
         context = {

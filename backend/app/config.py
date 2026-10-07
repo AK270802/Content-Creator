@@ -1,4 +1,4 @@
-﻿from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 
@@ -61,14 +61,21 @@ class Settings(BaseSettings):
     smtp_tls: bool = True
 
 
-    # Vision model (OpenAI-compatible: Ollama llava, vLLM, etc.)
+    # LLM provider: openrouter (default) | gemini | custom
+    llm_provider: str = "openrouter"
+    openrouter_api_key: str = ""
+    gemini_api_key: str = ""
+    llm_api_key: str = ""  # overrides the provider-specific key when set
+
+    # Vision model (OpenAI-compatible). Empty base URL / name -> provider defaults
     vision_model_base_url: str = ""
-    vision_model_name: str = "llava:7b"
-    vision_frame_count: int = 3  # frames extracted per scene
+    vision_model_name: str = ""
+    vision_input_mode: str = "auto"  # auto | video | frames
+    vision_frame_count: int = 3  # frames sampled per chunk in "frames" mode
 
     # Planning model (may differ from vision model)
     planning_model_base_url: str = ""
-    planning_model_name: str = "mistral:7b"
+    planning_model_name: str = ""
     planning_temperature: float = 0.1
 
     # Render
