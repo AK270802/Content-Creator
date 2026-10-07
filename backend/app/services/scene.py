@@ -1,4 +1,18 @@
-﻿from loguru import logger
+from loguru import logger
+
+
+def _probe_duration(video_path: str) -> float:
+    """Video length in seconds via ffprobe; 0.0 if it can't be read."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return round(float(out), 3)
+    except Exception:
+        return 0.0
 
 
 class SceneService:
@@ -21,12 +35,14 @@ class SceneService:
                     "end_time": round(end.get_seconds(), 3),
                 })
             if not result:
-                result.append({"scene_number": 1, "start_time": 0.0, "end_time": -1.0})
+                # No cuts detected: one scene spanning the whole video
+                result.append({"scene_number": 1, "start_time": 0.0,
+                               "end_time": _probe_duration(video_path)})
             logger.info(f"Detected {len(result)} scenes in {video_path}")
             return result
         except Exception as e:
             logger.error(f"Scene detection failed for {video_path}: {e}")
-            return [{"scene_number": 1, "start_time": 0.0, "end_time": -1.0}]
+            return [{"scene_number": 1, "start_time": 0.0, "end_time": _probe_duration(video_path)}]
 
 
 scene_service = SceneService()

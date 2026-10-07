@@ -271,7 +271,10 @@ async def resend_verification(db: AsyncSession, email: str, ip: str | None = Non
     email_norm = email.lower().strip()
     user = await db.scalar(select(User).where(User.email_normalized == email_norm))
     if not user or user.email_verified:
-        return  # generic non-response
+        # generic non-response to the client, but visible in logs
+        logger.info(f"Resend verification skipped for {email_norm}: "
+                    f"{'no such user' if not user else 'already verified'}")
+        return
 
     raw_token = secrets.token_urlsafe(32)
     db.add(EmailVerificationToken(
