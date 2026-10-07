@@ -1,4 +1,4 @@
-﻿import os
+import os
 import uuid
 import tempfile
 import subprocess
@@ -146,6 +146,43 @@ class RenderService:
             .run(quiet=True)
         )
 
+    def _finalize(self, input_path: str, output_path: str, video_bitrate: str | None = None) -> None:
+        """
+        Encode the delivered file so every phone/laptop/browser can play it:
+        8-bit 4:2:0 H.264 High profile, even dimensions, CFR-friendly, stereo
+        AAC-LC 48 kHz, moov atom at the front (+faststart).
+        Intermediates inherit the source pixel format (e.g. 10-bit HDR phone
+        footage -> "High 10" H.264), which most players reject.
+        """
+        has_audio = False
+        try:
+            import ffmpeg
+            has_audio = any(
+                st.get("codec_type") == "audio"
+                for st in ffmpeg.probe(input_path).get("streams", [])
+            )
+        except Exception:
+            pass
+
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-map", "0:v:0", *(["-map", "0:a:0"] if has_audio else []),
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+            "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-preset", "medium",
+        ]
+        if video_bitrate:
+            cmd += ["-b:v", str(video_bitrate), "-maxrate", str(video_bitrate), "-bufsize", str(video_bitrate)]
+        else:
+            cmd += ["-crf", "20"]
+        if has_audio:
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+        cmd += ["-movflags", "+faststart", output_path]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Final encode failed: {result.stderr[-1000:]}")
+
     def render(
         self,
         video_path: str,
@@ -258,10 +295,12 @@ class RenderService:
             has_captions = burn_captions and any(c["caption"].strip() for c in clip_info)
             if has_captions and os.path.getsize(srt_path) > 0:
                 font_size = 28 if (aspect_ratio or "").startswith("9") else 24
-                self._burn_captions(current, srt_path, output_path, font_size=font_size)
-            else:
-                import shutil
-                shutil.copy2(current, output_path)
+                captioned = os.path.join(tmpdir, "captioned.mp4")
+                self._burn_captions(current, srt_path, captioned, font_size=font_size)
+                current = captioned
+
+            # Final pass: re-encode to a universally playable MP4
+            self._finalize(current, output_path, video_bitrate)
 
             # Optional bitrate pass (re-encode if preset bitrate set and no captions path already encoded)
             if video_bitrate and has_captions is False and target_width:
